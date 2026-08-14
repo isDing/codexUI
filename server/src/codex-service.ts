@@ -1,0 +1,348 @@
+import { EventEmitter } from "node:events";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { AppConfig } from "./config.js";
+import { CodexAppServer } from "./codex-app-server.js";
+import type { AppDatabase } from "./database.js";
+import type {
+  ApprovalRequest,
+  CodexModel,
+  CodexThread,
+  JsonObject,
+  RpcMessage,
+  ThreadPreferences,
+  Workspace,
+} from "./types.js";
+
+const SOURCE_KINDS = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown",
+];
+
+const rpcResult = <T>(value: unknown): T => value as T;
+const requestKey = (id: number | string): string => Buffer.from(String(id)).toString("base64url");
+
+export class CodexService extends EventEmitter {
+  private readonly rpc: CodexAppServer;
+  private readonly threads = new Map<string, CodexThread>();
+  private models: CodexModel[] = [];
+  private approvals = new Map<string, ApprovalRequest>();
+  private viewers = new Map<string, string>();
+  private pollTimer: NodeJS.Timeout | null = null;
+  private polling = false;
+  private connected = false;
+
+  constructor(
+    private readonly config: AppConfig,
+    private readonly db: AppDatabase,
+  ) {
+    super();
+    this.rpc = new CodexAppServer(config);
+    this.rpc.on("notification", (message: RpcMessage) => this.onNotification(message));
+    this.rpc.on("serverRequest", (message: RpcMessage) => this.onServerRequest(message));
+    this.rpc.on("status", (status: { connected: boolean; message: string }) => {
+      this.connected = status.connected;
+      this.broadcast("connection", status);
+    });
+    this.rpc.on("diagnostic", (line: string) => console.warn(`[codex] ${line}`));
+  }
+
+  async start(): Promise<void> {
+    await this.rpc.start();
+    await Promise.all([this.refreshThreads(false), this.refreshModels()]);
+    this.pollTimer = setInterval(() => void this.refreshThreads(true), this.config.pollIntervalMs);
+  }
+
+  async stop(): Promise<void> {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
+    await this.rpc.stop();
+  }
+
+  async snapshot() {
+    if (this.threads.size === 0 && this.connected) await this.refreshThreads(false);
+    return {
+      connected: this.connected,
+      threads: this.sortedThreads(),
+      workspaces: await this.listWorkspaces(),
+      models: this.models,
+      unreadThreadIds: this.db.unreadThreadIds(),
+      pendingRequests: this.publicApprovals(),
+    };
+  }
+
+  async readThread(threadId: string) {
+    const result = await this.rpc.request<{ thread: CodexThread }>("thread/read", {
+      threadId,
+      includeTurns: true,
+    });
+    const thread = rpcResult<{ thread: CodexThread }>(result).thread;
+    this.threads.set(thread.id, { ...thread, archived: this.threads.get(thread.id)?.archived ?? false });
+    return { thread, preferences: this.db.getPreferences(threadId) };
+  }
+
+  async createThread(input: { cwd: string; model?: string | null; effort?: string | null; fullAccess: boolean }) {
+    const cwd = this.validateWorkspace(input.cwd);
+    const params: JsonObject = {
+      cwd,
+      model: input.model ?? undefined,
+      approvalPolicy: input.fullAccess ? "never" : "on-request",
+      sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+    };
+    const result = await this.rpc.request<{ thread: CodexThread; model: string; reasoningEffort: string | null }>(
+      "thread/start",
+      params,
+    );
+    const value = rpcResult<{ thread: CodexThread; model: string; reasoningEffort: string | null }>(result);
+    const preferences: ThreadPreferences = {
+      model: input.model ?? value.model,
+      effort: input.effort ?? value.reasoningEffort,
+      fullAccess: input.fullAccess,
+    };
+    this.db.setPreferences(value.thread.id, preferences);
+    this.threads.set(value.thread.id, { ...value.thread, archived: false });
+    this.broadcast("threads.changed", { thread: value.thread });
+    return { thread: value.thread, preferences };
+  }
+
+  async startTurn(
+    threadId: string,
+    input: { text: string; model: string | null; effort: string | null; fullAccess: boolean },
+  ) {
+    const known = this.threads.get(threadId);
+    if (!known) await this.readThread(threadId);
+    const preferences: ThreadPreferences = {
+      model: input.model,
+      effort: input.effort,
+      fullAccess: input.fullAccess,
+    };
+    await this.rpc.request("thread/resume", {
+      threadId,
+      model: input.model ?? undefined,
+      approvalPolicy: input.fullAccess ? "never" : "on-request",
+      sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+    });
+    this.db.setPreferences(threadId, preferences);
+    this.db.markRead(threadId);
+    const result = await this.rpc.request("turn/start", {
+      threadId,
+      input: [{ type: "text", text: input.text }],
+      model: input.model ?? undefined,
+      effort: input.effort ?? undefined,
+      approvalPolicy: input.fullAccess ? "never" : "on-request",
+      sandboxPolicy: input.fullAccess
+        ? { type: "dangerFullAccess" }
+        : {
+            type: "workspaceWrite",
+            writableRoots: [this.threads.get(threadId)?.cwd].filter(Boolean),
+            networkAccess: true,
+            excludeTmpdirEnvVar: false,
+            excludeSlashTmp: false,
+          },
+    });
+    return result;
+  }
+
+  markRead(threadId: string): void {
+    this.db.markRead(threadId);
+    this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
+  }
+
+  setViewer(clientId: string, threadId: string | null): void {
+    if (threadId) this.viewers.set(clientId, threadId);
+    else this.viewers.delete(clientId);
+  }
+
+  removeViewer(clientId: string): void {
+    this.viewers.delete(clientId);
+  }
+
+  publicApprovals(): Array<ApprovalRequest & { key: string }> {
+    return [...this.approvals.entries()].map(([key, request]) => ({ ...request, key }));
+  }
+
+  respondToRequest(key: string, body: JsonObject): void {
+    const pending = this.approvals.get(key);
+    if (!pending) throw new Error("该请求已处理或不存在");
+    let result: unknown;
+    const accepted = body.decision === "accept";
+    switch (pending.method) {
+      case "item/commandExecution/requestApproval":
+      case "item/fileChange/requestApproval":
+        result = { decision: accepted ? "accept" : "decline" };
+        break;
+      case "item/tool/requestUserInput":
+        result = { answers: body.answers ?? {} };
+        break;
+      case "mcpServer/elicitation/request":
+        result = accepted ? { action: "accept", content: body.content ?? {} } : { action: "decline" };
+        break;
+      default:
+        result = body.result ?? { decision: accepted ? "accept" : "decline" };
+    }
+    this.rpc.respond(pending.requestId, result);
+    this.approvals.delete(key);
+    this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
+  }
+
+  private async refreshModels(): Promise<void> {
+    const data: CodexModel[] = [];
+    let cursor: string | null = null;
+    do {
+      const result: { data: CodexModel[]; nextCursor: string | null } = await this.rpc.request("model/list", {
+        cursor,
+        limit: 100,
+        includeHidden: false,
+      });
+      data.push(...result.data);
+      cursor = result.nextCursor;
+    } while (cursor);
+    this.models = data;
+  }
+
+  private async refreshThreads(stateDbOnly: boolean): Promise<void> {
+    if (this.polling || !this.connected) return;
+    this.polling = true;
+    try {
+      const next = new Map<string, CodexThread>();
+      for (const archived of [false, true]) {
+        let cursor: string | null = null;
+        do {
+          const result: {
+            data: CodexThread[];
+            nextCursor: string | null;
+          } = await this.rpc.request("thread/list", {
+            cursor,
+            limit: 100,
+            sortKey: "updated_at",
+            sortDirection: "desc",
+            sourceKinds: SOURCE_KINDS,
+            archived,
+            useStateDbOnly: stateDbOnly,
+          });
+          for (const thread of result.data) next.set(thread.id, { ...thread, archived });
+          cursor = result.nextCursor;
+        } while (cursor);
+      }
+
+      let changed = next.size !== this.threads.size;
+      for (const [id, thread] of next) {
+        const before = this.threads.get(id);
+        if (!before || before.updatedAt !== thread.updatedAt || before.status.type !== thread.status.type) changed = true;
+        if (before?.status.type === "active" && thread.status.type !== "active") this.recordCompletion(id);
+      }
+      this.threads.clear();
+      for (const [id, thread] of next) this.threads.set(id, thread);
+      if (changed) this.broadcast("threads.changed", { threads: this.sortedThreads() });
+    } catch (error) {
+      console.warn("Failed to refresh Codex threads:", error);
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private onNotification(message: RpcMessage): void {
+    const params = message.params ?? {};
+    const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    if (message.method === "thread/started" && params.thread && typeof params.thread === "object") {
+      const thread = params.thread as CodexThread;
+      this.threads.set(thread.id, { ...thread, archived: false });
+    }
+    if (message.method === "thread/status/changed" && threadId && params.status && typeof params.status === "object") {
+      const thread = this.threads.get(threadId);
+      if (thread) thread.status = params.status as CodexThread["status"];
+    }
+    if (message.method === "turn/completed" && threadId) {
+      const thread = this.threads.get(threadId);
+      if (thread) thread.status = { type: "idle" };
+      this.recordCompletion(threadId);
+    }
+    if (message.method === "turn/started" && threadId) {
+      const thread = this.threads.get(threadId);
+      if (thread) thread.status = { type: "active" };
+    }
+    this.broadcast("codex.event", message);
+  }
+
+  private onServerRequest(message: RpcMessage): void {
+    if (message.id === undefined || !message.method) return;
+    const params = message.params ?? {};
+    const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    const preferences = threadId ? this.db.getPreferences(threadId) : null;
+    if (
+      preferences?.fullAccess &&
+      (message.method === "item/commandExecution/requestApproval" || message.method === "item/fileChange/requestApproval")
+    ) {
+      this.rpc.respond(message.id, { decision: "accept" });
+      return;
+    }
+    const key = requestKey(message.id);
+    this.approvals.set(key, {
+      requestId: message.id,
+      method: message.method,
+      params,
+      createdAt: Date.now(),
+    });
+    this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
+  }
+
+  private recordCompletion(threadId: string): void {
+    const beingViewed = [...this.viewers.values()].some((value) => value === threadId);
+    if (!beingViewed) this.db.markUnread(threadId);
+    this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
+  }
+
+  private sortedThreads(): CodexThread[] {
+    return [...this.threads.values()].sort((a, b) => (b.recencyAt ?? b.updatedAt) - (a.recencyAt ?? a.updatedAt));
+  }
+
+  private async listWorkspaces(): Promise<Workspace[]> {
+    const paths = new Set<string>();
+    for (const thread of this.threads.values()) paths.add(path.resolve(thread.cwd));
+    for (const root of this.config.workspaceRoots) {
+      paths.add(root);
+      try {
+        const entries = await fs.readdir(root, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory() && !entry.name.startsWith(".")) paths.add(path.join(root, entry.name));
+        }
+      } catch (error) {
+        console.warn(`Cannot scan workspace root ${root}:`, error);
+      }
+    }
+    return [...paths]
+      .map((workspacePath) => {
+        const members = [...this.threads.values()].filter((thread) => path.resolve(thread.cwd) === workspacePath);
+        return {
+          path: workspacePath,
+          name: path.basename(workspacePath) || workspacePath,
+          threadCount: members.length,
+          activeCount: members.filter((thread) => thread.status.type === "active").length,
+          latestAt: Math.max(0, ...members.map((thread) => thread.recencyAt ?? thread.updatedAt)),
+        };
+      })
+      .sort((a, b) => b.latestAt - a.latestAt || a.name.localeCompare(b.name));
+  }
+
+  private validateWorkspace(candidate: string): string {
+    const resolved = path.resolve(candidate);
+    const known = new Set([...this.threads.values()].map((thread) => path.resolve(thread.cwd)));
+    const insideRoot = this.config.workspaceRoots.some(
+      (root) => resolved === root || resolved.startsWith(`${root}${path.sep}`),
+    );
+    if (!insideRoot && !known.has(resolved)) throw new Error("工作区不在允许的目录中");
+    return resolved;
+  }
+
+  private broadcast(type: string, payload: unknown): void {
+    this.emit("event", { type, payload, at: Date.now() });
+  }
+}

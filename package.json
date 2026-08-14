@@ -1,0 +1,26 @@
+{
+  "name": "codex-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @codex-ui/web && npm run build --workspace @codex-ui/server",
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev --workspace @codex-ui/server\" \"npm run dev --workspace @codex-ui/web\"",
+    "start": "npm run start --workspace @codex-ui/server",
+    "test": "vitest run server/src",
+    "test:e2e": "playwright test",
+    "test:watch": "vitest server/src",
+    "typecheck": "npm run typecheck --workspace @codex-ui/server && npm run typecheck --workspace @codex-ui/web"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.2.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

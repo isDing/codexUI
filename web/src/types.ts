@@ -48,6 +48,11 @@ export type Model = {
 
 export type Preferences = { model: string | null; effort: string | null; fullAccess: boolean };
 
+export type HistoryPage = {
+  turns: Turn[];
+  nextCursor: string | null;
+};
+
 export type PendingRequest = {
   key: string;
   requestId: string | number;

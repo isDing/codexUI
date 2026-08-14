@@ -3,6 +3,8 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   CircleAlert,
   CircleCheck,
   CircleDot,
@@ -10,6 +12,7 @@ import {
   FileCode2,
   Folder,
   Folders,
+  FolderPlus,
   LoaderCircle,
   LockKeyhole,
   LogOut,
@@ -27,10 +30,14 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import webPackage from "../package.json";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -57,6 +64,29 @@ const emptySnapshot: Snapshot = {
   models: [],
   unreadThreadIds: [],
   pendingRequests: [],
+};
+
+const APP_VERSION = webPackage.version;
+const SELECTION_KEYS = {
+  workspace: "codex-ui.selected-workspace",
+  thread: "codex-ui.selected-thread",
+} as const;
+
+const readSelection = (key: string): string | null => {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const writeSelection = (key: string, value: string | null): void => {
+  try {
+    if (value) window.localStorage.setItem(key, value);
+    else window.localStorage.removeItem(key);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
 };
 
 export function App() {
@@ -138,7 +168,7 @@ function LoginScreen({ onLogin }: { onLogin: (username: string, password: string
         <header className="login-brand">
           <div className="brand-mark"><Code2 size={23} /></div>
           <div>
-            <h1 id="login-title">Codex UI</h1>
+            <div className="login-title-row"><h1 id="login-title">Codex UI</h1><span className="app-version">v{APP_VERSION}</span></div>
             <p>服务器会话控制台</p>
           </div>
         </header>
@@ -175,20 +205,33 @@ function LoginScreen({ onLogin }: { onLogin: (username: string, password: string
 
 function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthState; onAuthChange: (value: AuthState) => void }) {
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string>(() => readSelection(SELECTION_KEYS.workspace) ?? "");
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(() => readSelection(SELECTION_KEYS.thread));
   const [detail, setDetail] = useState<Thread | null>(null);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [preferences, setPreferences] = useState<Preferences>({ model: null, effort: null, fullAccess: false });
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [drawer, setDrawer] = useState<"workspaces" | "threads" | null>(null);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [search, setSearch] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
+  const restoreThreadRef = useRef<string | null>(null);
+  const detailRequestRef = useRef(0);
 
   selectedRef.current = selectedThreadId;
+
+  useEffect(() => {
+    writeSelection(SELECTION_KEYS.workspace, selectedWorkspace || null);
+  }, [selectedWorkspace]);
+
+  useEffect(() => {
+    writeSelection(SELECTION_KEYS.thread, selectedThreadId);
+  }, [selectedThreadId]);
 
   useActivityRefresh(api, auth, onAuthChange);
 
@@ -223,7 +266,16 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       .then((value) => {
         if (!cancelled) {
           setSnapshot(value);
-          setSelectedWorkspace((current) => current || value.workspaces[0]?.path || "");
+          const savedWorkspace = readSelection(SELECTION_KEYS.workspace);
+          const savedThreadId = readSelection(SELECTION_KEYS.thread);
+          const restoredThread = value.threads.find((thread) => thread.id === savedThreadId);
+          const workspace = restoredThread?.cwd
+            ?? (savedWorkspace && value.workspaces.some((entry) => entry.path === savedWorkspace) ? savedWorkspace : null)
+            ?? value.workspaces[0]?.path
+            ?? "";
+          setSelectedWorkspace(workspace);
+          setSelectedThreadId(restoredThread?.id ?? null);
+          restoreThreadRef.current = restoredThread?.id ?? null;
         }
       })
       .catch((reason) => setError(errorMessage(reason)))
@@ -262,11 +314,20 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             }));
           }
         }
+        if (message.type === "workspaces.changed") {
+          updateSnapshot({ workspaces: (message.payload as { workspaces: Workspace[] }).workspaces });
+        }
         if (message.type === "unread.changed") {
           updateSnapshot({ unreadThreadIds: (message.payload as { unreadThreadIds: string[] }).unreadThreadIds });
         }
         if (message.type === "requests.changed") {
           updateSnapshot({ pendingRequests: (message.payload as { pendingRequests: PendingRequest[] }).pendingRequests });
+        }
+        if (message.type === "thread.settings.changed") {
+          const payload = message.payload as { threadId?: string; preferences?: Preferences };
+          if (payload.threadId === selectedRef.current && payload.preferences) {
+            setPreferences(payload.preferences);
+          }
         }
         if (message.type === "codex.event") applyCodexEvent(message.payload as { method?: string; params?: Record<string, unknown> });
         if (message.type === "auth.expired") onAuthChange({ authenticated: false });
@@ -289,23 +350,68 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   }, [applyCodexEvent, onAuthChange, updateSnapshot]);
 
   const selectThread = async (thread: Thread) => {
+    const requestId = ++detailRequestRef.current;
     setSelectedThreadId(thread.id);
     setSelectedWorkspace(thread.cwd);
     setDrawer(null);
+    setDetail(null);
+    setHistoryCursor(null);
+    setHistoryLoading(false);
     setDetailLoading(true);
     setError("");
     socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: thread.id }));
     try {
       const [value, unread] = await Promise.all([api.readThread(thread.id), api.markRead(thread.id)]);
+      if (detailRequestRef.current !== requestId) return;
       setDetail(value.thread);
+      setHistoryCursor(value.nextCursor);
       setPreferences(normalizePreferences(value.preferences, snapshot.models));
       updateSnapshot({ unreadThreadIds: unread.unreadThreadIds });
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (detailRequestRef.current === requestId) setError(errorMessage(reason));
     } finally {
-      setDetailLoading(false);
+      if (detailRequestRef.current === requestId) setDetailLoading(false);
     }
   };
+
+  useEffect(() => {
+    const threadId = restoreThreadRef.current;
+    if (!threadId || detail || detailLoading) return;
+    const thread = snapshot.threads.find((entry) => entry.id === threadId);
+    if (!thread) return;
+    restoreThreadRef.current = null;
+    void selectThread(thread);
+  }, [detail, detailLoading, selectedThreadId, snapshot.threads]);
+
+  useEffect(() => {
+    if (!detail || detailLoading || historyLoading || !historyCursor) return;
+    const listStatus = snapshot.threads.find((entry) => entry.id === detail.id)?.status.type;
+    if (detail.status.type === "active" || listStatus === "active") return;
+    const threadId = detail.id;
+    const cursor = historyCursor;
+    const requestId = detailRequestRef.current;
+    const timer = window.setTimeout(() => {
+      setHistoryLoading(true);
+      void api
+        .readThreadHistory(threadId, cursor)
+        .then((page) => {
+          if (detailRequestRef.current !== requestId || selectedRef.current !== threadId) return;
+          setDetail((current) => current?.id === threadId
+            ? { ...current, turns: mergeHistoricalTurns(page.turns, current.turns) }
+            : current);
+          setHistoryCursor(page.nextCursor);
+        })
+        .catch((reason) => {
+          if (detailRequestRef.current !== requestId) return;
+          setHistoryCursor(null);
+          setError(`较早历史记录加载失败：${errorMessage(reason)}`);
+        })
+        .finally(() => {
+          if (detailRequestRef.current === requestId) setHistoryLoading(false);
+        });
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [api, detail, detailLoading, historyCursor, historyLoading, selectedThreadId, snapshot.threads]);
 
   const workspaceThreads = useMemo(
     () =>
@@ -321,6 +427,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
 
   const createThread = async (cwd: string, value: Preferences) => {
     const result = await api.createThread({ cwd, ...value });
+    detailRequestRef.current += 1;
     setSnapshot((current) => ({
       ...current,
       threads: [result.thread, ...current.threads.filter((thread) => thread.id !== result.thread.id)],
@@ -328,9 +435,31 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     setSelectedWorkspace(cwd);
     setSelectedThreadId(result.thread.id);
     setDetail(result.thread);
+    setHistoryCursor(null);
+    setHistoryLoading(false);
     setPreferences(result.preferences);
     setNewThreadOpen(false);
     socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: result.thread.id }));
+  };
+
+  const addWorkspace = async (workspacePath: string) => {
+    const result = await api.addWorkspace(workspacePath);
+    updateSnapshot({ workspaces: result.workspaces });
+    setSelectedWorkspace(result.path);
+    setWorkspaceDialogOpen(false);
+    setDrawer("threads");
+  };
+
+  const appendStartedTurn = (threadId: string, turn: Turn) => {
+    setDetail((current) => {
+      if (!current || current.id !== threadId) return current;
+      const index = current.turns.findIndex((entry) => entry.id === turn.id);
+      const turns = [...current.turns];
+      const existing = index >= 0 ? turns[index] : undefined;
+      if (existing) turns[index] = mergeTurn(existing, turn);
+      else turns.push(turn);
+      return { ...current, status: { type: "active" }, turns };
+    });
   };
 
   const logout = async () => {
@@ -346,7 +475,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       <header className="topbar">
         <div className="topbar-brand">
           <div className="brand-mark small"><Code2 size={19} /></div>
-          <strong>Codex UI</strong>
+          <strong>Codex UI</strong><span className="app-version">v{APP_VERSION}</span>
         </div>
         <div className="mobile-nav-actions">
           <IconButton title="工作区" onClick={() => setDrawer(drawer === "workspaces" ? null : "workspaces")}><Folders size={19} /></IconButton>
@@ -379,7 +508,10 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             </button>
           ))}
         </nav>
-        <div className="sidebar-footer"><Server size={15} /><span>{snapshot.workspaces.length} 个工作区</span></div>
+        <div className="sidebar-footer">
+          <span className="sidebar-footer-copy"><Server size={15} />{snapshot.workspaces.length} 个工作区</span>
+          <IconButton title="新增工作区" onClick={() => setWorkspaceDialogOpen(true)}><FolderPlus size={17} /></IconButton>
+        </div>
       </aside>
 
       <aside className={`thread-sidebar ${drawer === "threads" ? "drawer-open" : ""}`}>
@@ -407,7 +539,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         </nav>
       </aside>
 
-      {(drawer || newThreadOpen) && <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); }} />}
+      {(drawer || newThreadOpen || workspaceDialogOpen) && <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); setWorkspaceDialogOpen(false); }} />}
 
       <section className="conversation-pane">
         {error && <div className="global-error"><CircleAlert size={17} />{error}<button onClick={() => setError("")} aria-label="关闭"><X size={16} /></button></div>}
@@ -415,6 +547,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
           <EmptyConversation onCreate={() => setNewThreadOpen(true)} disabled={!selectedWorkspace} />
         ) : (
           <Conversation
+            key={selectedThread.id}
             api={api}
             thread={detail ?? selectedThread}
             listThread={selectedThread}
@@ -422,6 +555,8 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             preferences={preferences}
             pendingRequests={snapshot.pendingRequests.filter((request) => request.params.threadId === selectedThread.id)}
             loading={detailLoading}
+            loadingOlder={historyLoading}
+            onTurnStarted={appendStartedTurn}
             onPreferencesChange={setPreferences}
             onError={setError}
             onRequestsChange={(pendingRequests) => updateSnapshot({ pendingRequests })}
@@ -436,6 +571,13 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
           models={snapshot.models}
           onClose={() => setNewThreadOpen(false)}
           onCreate={createThread}
+        />
+      )}
+
+      {workspaceDialogOpen && (
+        <WorkspaceDialog
+          onClose={() => setWorkspaceDialogOpen(false)}
+          onAdd={addWorkspace}
         />
       )}
     </main>
@@ -508,6 +650,8 @@ function Conversation({
   preferences,
   pendingRequests,
   loading,
+  loadingOlder,
+  onTurnStarted,
   onPreferencesChange,
   onError,
   onRequestsChange,
@@ -519,20 +663,58 @@ function Conversation({
   preferences: Preferences;
   pendingRequests: PendingRequest[];
   loading: boolean;
+  loadingOlder: boolean;
+  onTurnStarted: (threadId: string, turn: Turn) => void;
   onPreferencesChange: (value: Preferences) => void;
   onError: (value: string) => void;
   onRequestsChange: (value: PendingRequest[]) => void;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
+  const scrollStateRef = useRef({ threadId: "", firstTurnId: "", lastTurnId: "", height: 0 });
   const active = listThread.status.type === "active" || thread.status.type === "active";
+  const previousActiveRef = useRef(active);
+  const [processesOpen, setProcessesOpen] = useState(active);
   const selectedModel = modelFor(models, preferences.model);
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [thread.turns]);
+    if (active === previousActiveRef.current) return;
+    previousActiveRef.current = active;
+    setProcessesOpen(active);
+  }, [active]);
+
+  useLayoutEffect(() => {
+    const details = scrollRef.current?.querySelectorAll<HTMLDetailsElement>(
+      "details.reasoning-item, details.commentary-message, details.tool-item",
+    );
+    details?.forEach((detail) => {
+      detail.open = processesOpen;
+    });
+  }, [processesOpen, thread.turns]);
+
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const previous = scrollStateRef.current;
+    const firstTurnId = thread.turns[0]?.id ?? "";
+    const lastTurnId = thread.turns.at(-1)?.id ?? "";
+    const prepended =
+      previous.threadId === thread.id &&
+      Boolean(previous.firstTurnId) &&
+      previous.firstTurnId !== firstTurnId &&
+      previous.lastTurnId === lastTurnId;
+
+    if (prepended) {
+      scroller.scrollTop += scroller.scrollHeight - previous.height;
+    } else if (previous.threadId !== thread.id || atBottomRef.current) {
+      scroller.scrollTop = scroller.scrollHeight;
+    }
+    atBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
+    scrollStateRef.current = { threadId: thread.id, firstTurnId, lastTurnId, height: scroller.scrollHeight };
+  }, [loadingOlder, thread.id, thread.turns]);
 
   useEffect(() => {
     if (selectedModel && !efforts.some((entry) => entry.reasoningEffort === preferences.effort)) {
@@ -544,8 +726,21 @@ function Conversation({
     if (!text.trim() || active || sending) return;
     setSending(true);
     onError("");
+    const requestText = text.trim();
     try {
-      await api.startTurn(thread.id, { text: text.trim(), ...preferences });
+      const result = await api.startTurn(thread.id, { text: requestText, ...preferences });
+      const turn = result.turn
+        ? ensureUserMessage(result.turn, requestText)
+        : {
+            id: `local-${Date.now()}`,
+            items: [userMessageItem(requestText)],
+            status: "inProgress",
+            error: null,
+            startedAt: Math.floor(Date.now() / 1000),
+            completedAt: null,
+            durationMs: null,
+          };
+      onTurnStarted(thread.id, turn);
       setText("");
     } catch (reason) {
       onError(errorMessage(reason));
@@ -562,6 +757,17 @@ function Conversation({
           <div><h1>{threadTitle(listThread)}</h1><p>{thread.cwd}</p></div>
         </div>
         <div className="session-controls">
+          <button
+            type="button"
+            className="process-toggle"
+            aria-label={processesOpen ? "收起过程" : "展开过程"}
+            aria-pressed={processesOpen}
+            title={processesOpen ? "收起全部思考、过程消息和工具调用" : "展开全部思考、过程消息和工具调用"}
+            onClick={() => setProcessesOpen((current) => !current)}
+          >
+            {processesOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />}
+            <span>{processesOpen ? "收起过程" : "展开过程"}</span>
+          </button>
           <label title="选择模型">
             <span>模型</span>
             <select
@@ -571,14 +777,14 @@ function Conversation({
                 onPreferencesChange({ ...preferences, model: event.target.value, effort: model?.defaultReasoningEffort ?? null });
               }}
             >
-              {models.map((model) => <option key={model.id} value={model.model}>{model.displayName}</option>)}
+              {models.map((model) => <option key={model.id} value={model.model} title={model.description}>{model.displayName}</option>)}
             </select>
             <ChevronDown size={14} />
           </label>
           <label title="选择思考强度">
             <span>思考</span>
             <select value={preferences.effort ?? ""} onChange={(event) => onPreferencesChange({ ...preferences, effort: event.target.value })}>
-              {efforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort}>{effortLabel(entry.reasoningEffort)}</option>)}
+              {efforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort} title={entry.description}>{effortLabel(entry.reasoningEffort)}</option>)}
             </select>
             <ChevronDown size={14} />
           </label>
@@ -595,14 +801,22 @@ function Conversation({
         </div>
       </header>
 
-      <div className="conversation-scroll">
+      <div
+        className="conversation-scroll"
+        ref={scrollRef}
+        data-processes-open={processesOpen ? "true" : "false"}
+        onScroll={(event) => {
+          const scroller = event.currentTarget;
+          atBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
+        }}
+      >
         {loading ? (
           <div className="history-loading"><LoaderCircle className="spin" size={20} />加载历史记录</div>
         ) : (
           <div className="history-stream">
-            {thread.turns.map((turn) => <TurnView key={turn.id} turn={turn} />)}
+            {loadingOlder && <div className="history-progress" role="status"><LoaderCircle className="spin" size={15} />正在加载较早记录</div>}
+            {thread.turns.map((turn) => <TurnView key={turn.id} turn={turn} processesOpen={processesOpen} />)}
             {thread.turns.length === 0 && <div className="new-thread-state"><Bot size={25} /><h2>新会话</h2><p>在下方输入第一项需求。</p></div>}
-            <div ref={endRef} />
           </div>
         )}
       </div>
@@ -635,10 +849,14 @@ function Conversation({
   );
 }
 
-function TurnView({ turn }: { turn: Turn }) {
+function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean }) {
   return (
     <section className="turn-block" data-status={turn.status}>
-      {turn.items.map((item, index) => <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} />)}
+      {turn.items.map((item, index) => (
+        processesOpen || !isProcessItem(item)
+          ? <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} />
+          : null
+      ))}
       {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
       {turn.error !== null && turn.error !== undefined && <div className="turn-error"><CircleAlert size={16} />{stringify(turn.error)}</div>}
     </section>
@@ -652,7 +870,17 @@ function ItemView({ item }: { item: ThreadItem }) {
     return <article className="message user-message"><div className="message-label"><User size={14} />你</div><div className="message-body">{text}</div></article>;
   }
   if (item.type === "agentMessage") {
-    return <article className="message agent-message"><div className="message-label"><Bot size={15} />Codex</div><div className="message-body">{String(item.text ?? "")}</div></article>;
+    const phase = typeof item.phase === "string" ? item.phase : "final_answer";
+    const content = String(item.text ?? "");
+    if (phase === "commentary") {
+      return (
+        <details className="message commentary-message">
+          <summary className="message-label"><Bot size={15} />过程消息</summary>
+          <div className="message-body markdown-body"><MarkdownContent content={content} /></div>
+        </details>
+      );
+    }
+    return <article className="message agent-message"><div className="message-label"><Bot size={15} />Codex</div><div className="message-body markdown-body"><MarkdownContent content={content} /></div></article>;
   }
   if (item.type === "reasoning") {
     const summary = Array.isArray(item.summary) ? item.summary.join("\n") : "";
@@ -660,24 +888,29 @@ function ItemView({ item }: { item: ThreadItem }) {
     return <details className="reasoning-item"><summary><CircleDot size={15} />思考过程</summary><pre>{summary || content || "正在思考..."}</pre></details>;
   }
   if (item.type === "plan") {
-    return <article className="tool-item"><div className="tool-heading"><CircleCheck size={15} />计划</div><pre>{String(item.text ?? "")}</pre></article>;
+    return (
+      <details className="tool-item compact-tool">
+        <summary><CircleCheck size={15} />计划<span className={`tool-status ${String(item.status ?? "")}`}>{toolStatus(item.status)}</span></summary>
+        <pre>{String(item.text ?? "")}</pre>
+      </details>
+    );
   }
   if (item.type === "commandExecution") {
     return (
-      <article className="tool-item command-item">
-        <div className="tool-heading"><TerminalSquare size={15} />命令<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></div>
+      <details className="tool-item command-item compact-tool">
+        <summary><TerminalSquare size={15} />命令<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
         <code>{String(item.command ?? "")}</code>
         {item.aggregatedOutput ? <pre>{String(item.aggregatedOutput)}</pre> : null}
-      </article>
+      </details>
     );
   }
   if (item.type === "fileChange") {
     const changes = Array.isArray(item.changes) ? item.changes : [];
     return (
-      <article className="tool-item file-item">
-        <div className="tool-heading"><FileCode2 size={15} />文件修改<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></div>
+      <details className="tool-item file-item compact-tool">
+        <summary><FileCode2 size={15} />文件修改<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
         <ul>{changes.map((change, index) => <li key={index}>{changePath(change)}</li>)}</ul>
-      </article>
+      </details>
     );
   }
   if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch"].includes(item.type)) {
@@ -760,6 +993,38 @@ function ApprovalBar({ api, requests, onError, onRequestsChange }: { api: ApiCli
   );
 }
 
+function WorkspaceDialog({ onClose, onAdd }: { onClose: () => void; onAdd: (workspacePath: string) => Promise<void> }) {
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const add = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      await onAdd(workspacePath.trim());
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title">
+      <header><div><FolderPlus size={18} /><h2 id="workspace-dialog-title">新增工作区</h2></div><IconButton title="关闭" onClick={onClose}><X size={18} /></IconButton></header>
+      <form onSubmit={add}>
+        <div className="dialog-body">
+          <label><span>工作区路径</span><input value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/home/user/code/project" autoFocus /></label>
+          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+        </div>
+        <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={submitting || !workspacePath.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <FolderPlus size={17} />}添加</button></footer>
+      </form>
+    </section>
+  );
+}
+
 function NewThreadDialog({ workspaces, initialWorkspace, models, onClose, onCreate }: {
   workspaces: Workspace[];
   initialWorkspace: string;
@@ -794,8 +1059,8 @@ function NewThreadDialog({ workspaces, initialWorkspace, models, onClose, onCrea
       <div className="dialog-body">
         <label><span>工作区</span><select value={cwd} onChange={(event) => setCwd(event.target.value)}>{workspaces.map((workspace) => <option key={workspace.path} value={workspace.path}>{workspace.name} - {workspace.path}</option>)}</select></label>
         <div className="dialog-grid">
-          <label><span>模型</span><select value={model} onChange={(event) => { const next = modelFor(models, event.target.value); setModel(event.target.value); setEffort(next?.defaultReasoningEffort ?? "medium"); }}>{models.map((entry) => <option key={entry.id} value={entry.model}>{entry.displayName}</option>)}</select></label>
-          <label><span>思考强度</span><select value={effort} onChange={(event) => setEffort(event.target.value)}>{selectedModel?.supportedReasoningEfforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort}>{effortLabel(entry.reasoningEffort)}</option>)}</select></label>
+        <label><span>模型</span><select value={model} onChange={(event) => { const next = modelFor(models, event.target.value); setModel(event.target.value); setEffort(next?.defaultReasoningEffort ?? "medium"); }}>{models.map((entry) => <option key={entry.id} value={entry.model} title={entry.description}>{entry.displayName}</option>)}</select></label>
+          <label><span>思考强度</span><select value={effort} onChange={(event) => setEffort(event.target.value)}>{selectedModel?.supportedReasoningEfforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort} title={entry.description}>{effortLabel(entry.reasoningEffort)}</option>)}</select></label>
         </div>
         <label className="dialog-toggle"><div><ShieldAlert size={17} /><span><strong>完全访问权限</strong><small>关闭沙箱与命令审批</small></span></div><input type="checkbox" checked={fullAccess} onChange={(event) => setFullAccess(event.target.checked)} /><i /></label>
         {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -815,16 +1080,36 @@ function mutateThreadFromEvent(thread: Thread, message: { method?: string; param
   const turnId = typeof params.turnId === "string" ? params.turnId : isRecord(params.turn) && typeof params.turn.id === "string" ? params.turn.id : null;
   if (message.method === "turn/started" && isRecord(params.turn)) {
     const turn = params.turn as Turn;
-    if (!next.turns.some((entry) => entry.id === turn.id)) next.turns.push(turn);
+    const index = next.turns.findIndex((entry) => entry.id === turn.id);
+    const existing = index >= 0 ? next.turns[index] : undefined;
+    if (existing) next.turns[index] = mergeTurn(existing, turn);
+    else next.turns.push(turn);
     next.status = { type: "active" };
     return next;
   }
   if (message.method === "turn/completed" && isRecord(params.turn)) {
     const turn = params.turn as Turn;
     const index = next.turns.findIndex((entry) => entry.id === turn.id);
-    if (index >= 0) next.turns[index] = turn;
+    const existing = index >= 0 ? next.turns[index] : undefined;
+    if (existing) next.turns[index] = mergeTurn(existing, turn);
     else next.turns.push(turn);
     next.status = { type: "idle" };
+    return next;
+  }
+  if (message.method === "turn/completed") {
+    const turn = turnId ? next.turns.find((entry) => entry.id === turnId) : undefined;
+    if (turn) {
+      turn.status = "completed";
+      turn.completedAt = turn.completedAt ?? Math.floor(Date.now() / 1000);
+    }
+    next.status = { type: "idle" };
+    return next;
+  }
+  if (message.method === "turn/started") {
+    if (turnId && !next.turns.some((entry) => entry.id === turnId)) {
+      next.turns.push({ id: turnId, items: [], status: "inProgress", error: null, startedAt: Math.floor(Date.now() / 1000), completedAt: null, durationMs: null });
+    }
+    next.status = { type: "active" };
     return next;
   }
   if (!turnId) return next;
@@ -836,7 +1121,9 @@ function mutateThreadFromEvent(thread: Thread, message: { method?: string; param
   const itemId = typeof params.itemId === "string" ? params.itemId : isRecord(params.item) && typeof params.item.id === "string" ? params.item.id : null;
   if ((message.method === "item/started" || message.method === "item/completed") && isRecord(params.item)) {
     const item = params.item as ThreadItem;
-    const index = turn.items.findIndex((entry) => entry.id === item.id);
+    const index = turn.items.findIndex((entry) => entry.id === item.id || (
+      item.type === "userMessage" && userMessageText(entry) !== "" && userMessageText(entry) === userMessageText(item)
+    ));
     if (index >= 0) turn.items[index] = item;
     else turn.items.push(item);
     return next;
@@ -865,10 +1152,63 @@ function mutateThreadFromEvent(thread: Thread, message: { method?: string; param
   return next;
 }
 
+const mergeHistoricalTurns = (older: Turn[], current: Turn[]): Turn[] => {
+  const currentIds = new Set(current.map((turn) => turn.id));
+  return [...older.filter((turn) => !currentIds.has(turn.id)), ...current];
+};
+
+const userMessageText = (item: ThreadItem): string => {
+  if (item.type !== "userMessage" || !Array.isArray(item.content)) return "";
+  return item.content
+    .map((entry) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : ""))
+    .filter(Boolean)
+    .join("\n");
+};
+
+const userMessageItem = (text: string): ThreadItem => ({
+  id: `user-${Date.now()}`,
+  type: "userMessage",
+  content: [{ type: "text", text }],
+});
+
+const ensureUserMessage = (turn: Turn, text: string): Turn =>
+  turn.items.some((item) => userMessageText(item) === text)
+    ? turn
+    : { ...turn, items: [userMessageItem(text), ...turn.items] };
+
+const mergeTurn = (existing: Turn, incoming: Turn): Turn => {
+  const incomingIds = new Set(incoming.items.map((item) => item.id).filter(Boolean));
+  const incomingUserTexts = new Set(incoming.items.map(userMessageText).filter(Boolean));
+  const existingOnly = existing.items.filter((item) => {
+    const text = userMessageText(item);
+    return (!item.id || !incomingIds.has(item.id)) && (!text || !incomingUserTexts.has(text));
+  });
+  const mergedItems = [...incoming.items, ...existingOnly];
+  return {
+    ...existing,
+    ...incoming,
+    items: [
+      ...mergedItems.filter((item) => userMessageText(item) !== ""),
+      ...mergedItems.filter((item) => userMessageText(item) === ""),
+    ],
+  };
+};
+
+const isProcessItem = (item: ThreadItem): boolean =>
+  item.type === "reasoning" ||
+  item.type === "plan" ||
+  item.type === "commandExecution" ||
+  item.type === "fileChange" ||
+  ["mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch"].includes(item.type) ||
+  (item.type === "agentMessage" && item.phase === "commentary");
+
 const modelFor = (models: Model[], value: string | null) => models.find((model) => model.model === value || model.id === value) ?? models.find((model) => model.isDefault) ?? models[0];
 const normalizePreferences = (value: Preferences, models: Model[]): Preferences => {
   const model = modelFor(models, value.model);
-  return { model: value.model ?? model?.model ?? null, effort: value.effort ?? model?.defaultReasoningEffort ?? null, fullAccess: value.fullAccess };
+  const effort = model?.supportedReasoningEfforts.some((entry) => entry.reasoningEffort === value.effort)
+    ? value.effort
+    : model?.defaultReasoningEffort ?? null;
+  return { model: model?.model ?? null, effort, fullAccess: value.fullAccess };
 };
 
 const threadTitle = (thread: Thread): string => thread.name?.trim() || thread.preview?.trim().split("\n")[0]?.slice(0, 68) || "未命名会话";
@@ -884,7 +1224,7 @@ const relativeTime = (timestamp: number): string => {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
   return `${Math.floor(seconds / 86400)} 天`;
 };
-const effortLabel = (value: string): string => ({ none: "无", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大" })[value] ?? value;
+const effortLabel = (value: string): string => ({ none: "无", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大", ultra: "极高" })[value] ?? value;
 const toolStatus = (value: unknown): string => ({ inProgress: "进行中", completed: "完成", failed: "失败", declined: "已拒绝" })[String(value)] ?? "";
 const toolName = (item: ThreadItem): string => String(item.tool ?? (item.type === "webSearch" ? "网页搜索" : "工具调用"));
 const changePath = (change: unknown): string => {
@@ -898,3 +1238,7 @@ const stringify = (value: unknown): string => {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+
+function MarkdownContent({ content }: { content: string }) {
+  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>;
+}

@@ -26,13 +26,97 @@ const SOURCE_KINDS = [
   "subAgentOther",
   "unknown",
 ];
+const INITIAL_HISTORY_PAGE_SIZE = 2;
+const HISTORY_PAGE_SIZE = 4;
 
 const rpcResult = <T>(value: unknown): T => value as T;
 const requestKey = (id: number | string): string => Buffer.from(String(id)).toString("base64url");
 
+type RuntimeSettings = JsonObject & {
+  model?: unknown;
+  reasoningEffort?: unknown;
+  effort?: unknown;
+  approvalPolicy?: unknown;
+  approval_policy?: unknown;
+  sandbox?: unknown;
+  sandboxPolicy?: unknown;
+  sandbox_mode?: unknown;
+  activePermissionProfile?: unknown;
+  active_permission_profile?: unknown;
+  permission_profile?: unknown;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+const stringValue = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
+
+const permissionProfileId = (value: unknown): string | null => {
+  if (!isRecord(value)) return null;
+  return stringValue(value.id);
+};
+
+const sandboxType = (value: unknown): string | null => {
+  if (typeof value === "string") return value;
+  return isRecord(value) ? stringValue(value.type) : null;
+};
+
+export const preferencesFromRuntimeSettings = (
+  settings: RuntimeSettings,
+  fallback: ThreadPreferences = { model: null, effort: null, fullAccess: false },
+): ThreadPreferences => {
+  const profileId = permissionProfileId(settings.activePermissionProfile ?? settings.active_permission_profile);
+  const approvalPolicy = settings.approvalPolicy ?? settings.approval_policy;
+  const sandbox = settings.sandbox ?? settings.sandboxPolicy ?? settings.sandbox_mode;
+  const profileDisabled = isRecord(settings.permission_profile) && settings.permission_profile.type === "disabled";
+  const fullAccess =
+    profileId === ":danger-full-access" ||
+    profileDisabled ||
+    (approvalPolicy === "never" && sandboxType(sandbox) === "dangerFullAccess") ||
+    (approvalPolicy === "never" && sandboxType(sandbox) === "danger-full-access");
+  return {
+    model: stringValue(settings.model) ?? fallback.model,
+    effort: stringValue(settings.reasoningEffort ?? settings.effort) ?? fallback.effort,
+    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined ? fallback.fullAccess : false),
+  };
+};
+
+export const preferencesFromPersistedSettings = (
+  settings: JsonObject,
+  fallback: ThreadPreferences = { model: null, effort: null, fullAccess: false },
+): ThreadPreferences => {
+  const profileId = permissionProfileId(settings.active_permission_profile ?? settings.activePermissionProfile);
+  const profileDisabled = isRecord(settings.permission_profile) && settings.permission_profile.type === "disabled";
+  const approvalPolicy = settings.approval_policy ?? settings.approvalPolicy;
+  const sandbox = settings.sandbox_mode ?? settings.sandbox ?? settings.sandboxPolicy;
+  const fullAccess =
+    profileId === ":danger-full-access" ||
+    profileDisabled ||
+    (approvalPolicy === "never" && sandboxType(sandbox) === "danger-full-access") ||
+    (approvalPolicy === "never" && sandboxType(sandbox) === "dangerFullAccess");
+  return {
+    model: stringValue(settings.model) ?? fallback.model,
+    effort: stringValue(settings.reasoning_effort ?? settings.reasoningEffort ?? settings.effort) ?? fallback.effort,
+    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined ? fallback.fullAccess : false),
+  };
+};
+
+const persistedSettingsFromLine = (line: string): JsonObject | null => {
+  try {
+    const event = JSON.parse(line) as { payload?: unknown };
+    const payload = event.payload;
+    return isRecord(payload) && payload.type === "thread_settings_applied" && isRecord(payload.thread_settings)
+      ? payload.thread_settings
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+type PersistedSettingsResult = ThreadPreferences | null;
+
 export class CodexService extends EventEmitter {
   private readonly rpc: CodexAppServer;
   private readonly threads = new Map<string, CodexThread>();
+  private readonly pendingThreads = new Map<string, CodexThread>();
   private models: CodexModel[] = [];
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
@@ -80,13 +164,48 @@ export class CodexService extends EventEmitter {
   }
 
   async readThread(threadId: string) {
-    const result = await this.rpc.request<{ thread: CodexThread }>("thread/read", {
+    const pending = this.pendingThreads.get(threadId);
+    if (pending) return { thread: pending, preferences: this.db.getPreferences(threadId), nextCursor: null };
+    const [result, history] = await Promise.all([
+      this.rpc.request<{ thread: CodexThread }>("thread/read", {
+        threadId,
+        includeTurns: false,
+      }),
+      this.readThreadHistory(threadId, null, INITIAL_HISTORY_PAGE_SIZE),
+    ]);
+    const metadata = rpcResult<{ thread: CodexThread }>(result).thread;
+    const archived = this.threads.get(metadata.id)?.archived ?? false;
+    const thread = { ...metadata, archived, turns: history.turns };
+    this.threads.set(metadata.id, { ...metadata, archived, turns: [] });
+    const fallback = this.db.getPreferences(threadId);
+    let preferences = (await this.readPersistedPreferences(thread, fallback)) ?? fallback;
+    if (!preferences.model || !preferences.effort) {
+      try {
+        const runtime = await this.rpc.request<RuntimeSettings>("thread/resume", { threadId });
+        preferences = preferencesFromRuntimeSettings(runtime, preferences);
+      } catch {
+        // Active writers cannot be resumed from this app-server; persisted settings remain authoritative.
+      }
+    }
+    this.db.setPreferences(threadId, preferences);
+    return { thread, preferences, nextCursor: history.nextCursor };
+  }
+
+  async readThreadHistory(threadId: string, cursor: string | null, limit = HISTORY_PAGE_SIZE) {
+    const result = await this.rpc.request<{
+      data: CodexThread["turns"];
+      nextCursor?: string | null;
+    }>("thread/turns/list", {
       threadId,
-      includeTurns: true,
+      cursor,
+      limit,
+      sortDirection: "desc",
+      itemsView: "full",
     });
-    const thread = rpcResult<{ thread: CodexThread }>(result).thread;
-    this.threads.set(thread.id, { ...thread, archived: this.threads.get(thread.id)?.archived ?? false });
-    return { thread, preferences: this.db.getPreferences(threadId) };
+    return {
+      turns: [...result.data].reverse(),
+      nextCursor: result.nextCursor ?? null,
+    };
   }
 
   async createThread(input: { cwd: string; model?: string | null; effort?: string | null; fullAccess: boolean }) {
@@ -109,34 +228,58 @@ export class CodexService extends EventEmitter {
     };
     this.db.setPreferences(value.thread.id, preferences);
     this.threads.set(value.thread.id, { ...value.thread, archived: false });
+    this.pendingThreads.set(value.thread.id, value.thread);
     this.broadcast("threads.changed", { thread: value.thread });
     return { thread: value.thread, preferences };
+  }
+
+  async addWorkspace(candidate: string) {
+    const workspacePath = this.validateWorkspace(candidate);
+    const stat = await fs.stat(workspacePath).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error("工作区目录不存在或不是目录");
+    this.db.addWorkspacePath(workspacePath);
+    const workspaces = await this.listWorkspaces();
+    this.broadcast("workspaces.changed", { workspaces });
+    return { path: workspacePath, workspaces };
   }
 
   async startTurn(
     threadId: string,
     input: { text: string; model: string | null; effort: string | null; fullAccess: boolean },
   ) {
-    const known = this.threads.get(threadId);
-    if (!known) await this.readThread(threadId);
+    let known = this.threads.get(threadId);
+    const pending = this.pendingThreads.get(threadId);
+    if (!known && pending) {
+      known = { ...pending, archived: false };
+      this.threads.set(threadId, known);
+    }
+    if (!known) {
+      await this.readThread(threadId);
+      known = this.threads.get(threadId);
+    }
+    const stored = this.db.getPreferences(threadId);
+    const model = input.model ?? stored.model;
+    const effort = input.effort ?? stored.effort;
     const preferences: ThreadPreferences = {
-      model: input.model,
-      effort: input.effort,
+      model,
+      effort,
       fullAccess: input.fullAccess,
     };
-    await this.rpc.request("thread/resume", {
-      threadId,
-      model: input.model ?? undefined,
-      approvalPolicy: input.fullAccess ? "never" : "on-request",
-      sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
-    });
+    if (!pending) {
+      await this.rpc.request("thread/resume", {
+        threadId,
+        model: model ?? undefined,
+        approvalPolicy: input.fullAccess ? "never" : "on-request",
+        sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+      });
+    }
     this.db.setPreferences(threadId, preferences);
     this.db.markRead(threadId);
     const result = await this.rpc.request("turn/start", {
       threadId,
       input: [{ type: "text", text: input.text }],
-      model: input.model ?? undefined,
-      effort: input.effort ?? undefined,
+      model: model ?? undefined,
+      effort: effort ?? undefined,
       approvalPolicy: input.fullAccess ? "never" : "on-request",
       sandboxPolicy: input.fullAccess
         ? { type: "dangerFullAccess" }
@@ -146,8 +289,9 @@ export class CodexService extends EventEmitter {
             networkAccess: true,
             excludeTmpdirEnvVar: false,
             excludeSlashTmp: false,
-          },
+      },
     });
+    this.pendingThreads.delete(threadId);
     return result;
   }
 
@@ -233,6 +377,10 @@ export class CodexService extends EventEmitter {
         } while (cursor);
       }
 
+      for (const [threadId, thread] of this.pendingThreads) {
+        if (!next.has(threadId)) next.set(threadId, { ...thread, archived: false });
+      }
+
       let changed = next.size !== this.threads.size;
       for (const [id, thread] of next) {
         const before = this.threads.get(id);
@@ -268,6 +416,12 @@ export class CodexService extends EventEmitter {
     if (message.method === "turn/started" && threadId) {
       const thread = this.threads.get(threadId);
       if (thread) thread.status = { type: "active" };
+      this.pendingThreads.delete(threadId);
+    }
+    if (message.method === "thread/settings/updated" && threadId && isRecord(params.threadSettings)) {
+      const preferences = preferencesFromRuntimeSettings(params.threadSettings, this.db.getPreferences(threadId));
+      this.db.setPreferences(threadId, preferences);
+      this.broadcast("thread.settings.changed", { threadId, preferences });
     }
     this.broadcast("codex.event", message);
   }
@@ -300,6 +454,41 @@ export class CodexService extends EventEmitter {
     this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
   }
 
+  private async readPersistedPreferences(thread: CodexThread, fallback: ThreadPreferences): Promise<PersistedSettingsResult> {
+    if (!thread.path) return null;
+    const chunkSize = 64 * 1024;
+    try {
+      const file = await fs.open(thread.path, "r");
+      try {
+        const size = (await file.stat()).size;
+        let position = size;
+        let pending = Buffer.alloc(0);
+        while (position > 0) {
+          const length = Math.min(chunkSize, position);
+          position -= length;
+          const buffer = Buffer.allocUnsafe(length);
+          await file.read(buffer, 0, length, position);
+          const data = Buffer.concat([buffer, pending]);
+          let end = data.length;
+          for (let index = data.length - 1; index >= 0; index -= 1) {
+            if (data[index] !== 10) continue;
+            const line = data.subarray(index + 1, end).toString("utf8");
+            const settings = persistedSettingsFromLine(line);
+            if (settings) return preferencesFromPersistedSettings(settings, fallback);
+            end = index;
+          }
+          pending = data.subarray(0, end);
+        }
+        const settings = persistedSettingsFromLine(pending.toString("utf8"));
+        return settings ? preferencesFromPersistedSettings(settings, fallback) : null;
+      } finally {
+        await file.close();
+      }
+    } catch {
+      return null;
+    }
+  }
+
   private sortedThreads(): CodexThread[] {
     return [...this.threads.values()].sort((a, b) => (b.recencyAt ?? b.updatedAt) - (a.recencyAt ?? a.updatedAt));
   }
@@ -307,6 +496,7 @@ export class CodexService extends EventEmitter {
   private async listWorkspaces(): Promise<Workspace[]> {
     const paths = new Set<string>();
     for (const thread of this.threads.values()) paths.add(path.resolve(thread.cwd));
+    for (const workspacePath of this.db.workspacePaths()) paths.add(path.resolve(workspacePath));
     for (const root of this.config.workspaceRoots) {
       paths.add(root);
       try {

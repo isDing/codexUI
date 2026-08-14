@@ -37,6 +37,10 @@ export class AppDatabase {
         unread INTEGER NOT NULL DEFAULT 0,
         completed_at INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS workspace_paths (
+        path TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -97,6 +101,15 @@ export class AppDatabase {
           updated_at = excluded.updated_at
       `)
       .run(threadId, value.model, value.effort, value.fullAccess ? 1 : 0, now);
+  }
+
+  addWorkspacePath(workspacePath: string, now = Date.now()): void {
+    this.db.prepare("INSERT OR IGNORE INTO workspace_paths (path, created_at) VALUES (?, ?)").run(workspacePath, now);
+  }
+
+  workspacePaths(): string[] {
+    const rows = this.db.prepare("SELECT path FROM workspace_paths ORDER BY created_at ASC").all() as Array<{ path: string }>;
+    return rows.map((row) => row.path);
   }
 
   markUnread(threadId: string, completedAt = Date.now()): void {

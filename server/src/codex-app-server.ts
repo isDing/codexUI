@@ -83,7 +83,7 @@ export class CodexAppServer extends EventEmitter {
     });
 
     await this.sendRequest("initialize", {
-      clientInfo: { name: "codex_ui", title: "Codex UI", version: "1.0.0" },
+      clientInfo: { name: "codex_ui", title: "Codex UI", version: "1.0.4" },
       capabilities: { experimentalApi: true },
     });
     this.write({ method: "initialized", params: {} });

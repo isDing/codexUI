@@ -30,6 +30,8 @@ const threadSchema = z.object({
   effort: z.string().nullable().optional(),
   fullAccess: z.boolean().default(false),
 });
+const workspaceSchema = z.object({ path: z.string().trim().min(1).max(4_000) });
+const historyQuerySchema = z.object({ cursor: z.string().min(1).max(20_000) });
 const turnSchema = z.object({
   text: z.string().trim().min(1).max(100_000),
   model: z.string().nullable().optional(),
@@ -154,6 +156,20 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     }
   });
 
+  app.post("/api/workspaces", auth, requireCsrf, async (request: Request, response: Response) => {
+    const parsed = workspaceSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "工作区路径无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      response.status(201).json(await service.addWorkspace(parsed.data.path));
+    } catch (error) {
+      jsonError(response, 400, error);
+    }
+  });
+
   app.get("/api/threads/:threadId", auth, async (request, response) => {
     const threadId = idParam.safeParse(request.params.threadId);
     if (!threadId.success) {
@@ -163,6 +179,21 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     try {
       touch(request, db);
       response.json(await service.readThread(threadId.data));
+    } catch (error) {
+      jsonError(response, 404, error);
+    }
+  });
+
+  app.get("/api/threads/:threadId/history", auth, async (request, response) => {
+    const threadId = idParam.safeParse(request.params.threadId);
+    const query = historyQuerySchema.safeParse(request.query);
+    if (!threadId.success || !query.success) {
+      response.status(400).json({ error: "历史记录游标无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      response.json(await service.readThreadHistory(threadId.data, query.data.cursor));
     } catch (error) {
       jsonError(response, 404, error);
     }

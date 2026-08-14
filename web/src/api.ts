@@ -1,4 +1,4 @@
-import type { AuthState, Preferences, Snapshot, Thread } from "./types";
+import type { AuthState, HistoryPage, Preferences, Snapshot, Thread, Turn } from "./types";
 
 export class ApiClient {
   private csrfToken = "";
@@ -29,8 +29,16 @@ export class ApiClient {
     return this.request("/api/bootstrap");
   }
 
-  readThread(threadId: string): Promise<{ thread: Thread; preferences: Preferences }> {
+  addWorkspace(path: string): Promise<{ path: string; workspaces: Snapshot["workspaces"] }> {
+    return this.request("/api/workspaces", this.writeOptions({ path }));
+  }
+
+  readThread(threadId: string): Promise<{ thread: Thread; preferences: Preferences; nextCursor: string | null }> {
     return this.request(`/api/threads/${encodeURIComponent(threadId)}`);
+  }
+
+  readThreadHistory(threadId: string, cursor: string): Promise<HistoryPage> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}/history?cursor=${encodeURIComponent(cursor)}`);
   }
 
   markRead(threadId: string): Promise<{ unreadThreadIds: string[] }> {
@@ -41,7 +49,7 @@ export class ApiClient {
     return this.request("/api/threads", this.writeOptions(value));
   }
 
-  startTurn(threadId: string, value: { text: string } & Preferences): Promise<unknown> {
+  startTurn(threadId: string, value: { text: string } & Preferences): Promise<{ turn?: Turn }> {
     return this.request(`/api/threads/${encodeURIComponent(threadId)}/turns`, this.writeOptions(value));
   }
 

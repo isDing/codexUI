@@ -54,6 +54,13 @@ export class ApiClient {
     );
   }
 
+  runCommand(threadId: string, command: string, args?: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/threads/${encodeURIComponent(threadId)}/command`,
+      this.writeOptions({ command, args }),
+    );
+  }
+
   createThread(value: { cwd: string } & Preferences): Promise<{ thread: Thread; preferences: Preferences }> {
     return this.request("/api/threads", this.writeOptions(value));
   }

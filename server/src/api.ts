@@ -47,6 +47,10 @@ const approvalSchema = z.object({
 
 const idParam = z.string().min(1).max(200);
 const cancelSchema = z.object({ turnId: z.string().min(1).max(200).optional() });
+const commandSchema = z.object({
+  command: z.enum(["rename", "archive", "unarchive", "compact", "goal", "steer"]),
+  args: z.string().trim().max(2_000).optional(),
+});
 
 const jsonError = (response: Response, status: number, error: unknown): void => {
   const message = error instanceof Error ? error.message : "请求失败";
@@ -282,6 +286,21 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
       touch(request, db);
       await service.cancelTurn(threadId.data, body.data.turnId);
       response.json({ ok: true });
+    } catch (error) {
+      jsonError(response, 400, error);
+    }
+  });
+
+  app.post("/api/threads/:threadId/command", auth, requireCsrf, async (request: Request, response: Response) => {
+    const threadId = idParam.safeParse(request.params.threadId);
+    const body = commandSchema.safeParse(request.body ?? {});
+    if (!threadId.success || !body.success) {
+      response.status(400).json({ error: "命令参数无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      response.json(await service.runCommand(threadId.data, body.data.command, body.data.args));
     } catch (error) {
       jsonError(response, 400, error);
     }

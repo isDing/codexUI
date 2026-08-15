@@ -376,6 +376,60 @@ export class CodexService extends EventEmitter {
     return [...this.approvals.entries()].map(([key, request]) => ({ ...request, key }));
   }
 
+  async runCommand(threadId: string, command: string, args: string | undefined) {
+    const known = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
+    if (!known) throw new Error("会话不存在");
+    switch (command) {
+      case "rename": {
+        if (!args?.trim()) throw new Error("请提供新名称：/rename <名称>");
+        await this.rpc.request("thread/name/set", { threadId, name: args.trim() });
+        const thread = this.threads.get(threadId);
+        if (thread) thread.name = args.trim();
+        break;
+      }
+      case "archive": {
+        await this.rpc.request("thread/archive", { threadId });
+        const thread = this.threads.get(threadId);
+        if (thread) thread.archived = true;
+        break;
+      }
+      case "unarchive": {
+        await this.rpc.request("thread/unarchive", { threadId });
+        const thread = this.threads.get(threadId);
+        if (thread) thread.archived = false;
+        break;
+      }
+      case "compact": {
+        // compact 只对当前 app-server 已加载的会话生效：先尝试 resume（失败时
+        // 由 compact 调用自身报错，例如会话被其他进程占用）
+        await this.rpc.request("thread/resume", { threadId }).catch(() => undefined);
+        await this.rpc.request("thread/compact/start", { threadId });
+        break;
+      }
+      case "goal": {
+        if (!args?.trim()) throw new Error("请提供目标内容：/goal <目标>");
+        await this.rpc.request("thread/goal/set", { threadId, objective: args.trim() });
+        break;
+      }
+      case "steer": {
+        if (!args?.trim()) throw new Error("请提供追加指令：/steer <指令>");
+        const turnId = this.startedTurnIds.get(threadId);
+        if (!turnId) throw new Error("当前没有进行中的任务");
+        await this.rpc.request("turn/steer", {
+          threadId,
+          input: [{ type: "text", text: args.trim() }],
+          expectedTurnId: turnId,
+        });
+        break;
+      }
+      default:
+        throw new Error("未知命令");
+    }
+    this.readCache.delete(threadId);
+    this.broadcast("threads.changed", { threads: this.sortedThreads() });
+    return { ok: true };
+  }
+
   respondToRequest(key: string, body: JsonObject): void {
     const pending = this.approvals.get(key);
     if (!pending) throw new Error("该请求已处理或不存在");

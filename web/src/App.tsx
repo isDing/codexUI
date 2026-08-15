@@ -757,6 +757,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             onLoadOlder={fetchOlderHistory}
             onTurnStarted={appendStartedTurn}
             onTurnCancelled={markTurnCancelled}
+            onNewThread={() => setNewThreadOpen(true)}
             onPreferencesChange={setPreferences}
             onError={setError}
             onRequestsChange={(pendingRequests) => updateSnapshot({ pendingRequests })}

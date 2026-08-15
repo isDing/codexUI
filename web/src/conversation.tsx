@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Send,
   ShieldAlert,
+  Slash,
   Square,
   TerminalSquare,
   User,
@@ -36,6 +37,7 @@ import {
   toolStatus,
   userMessageItem,
 } from "./lib";
+import { filterSlashCommands, matchSlashCommand, parseSlash, type SlashCommand } from "./slash";
 import type { Model, PendingRequest, Preferences, Thread, ThreadItem, Turn } from "./types";
 
 export function Conversation({
@@ -51,6 +53,7 @@ export function Conversation({
   onLoadOlder,
   onTurnStarted,
   onTurnCancelled,
+  onNewThread,
   onPreferencesChange,
   onError,
   onRequestsChange,
@@ -67,6 +70,7 @@ export function Conversation({
   onLoadOlder: () => void;
   onTurnStarted: (threadId: string, turn: Turn) => void;
   onTurnCancelled: (threadId: string) => void;
+  onNewThread: () => void;
   onPreferencesChange: (value: Preferences) => void;
   onError: (value: string) => void;
   onRequestsChange: (value: PendingRequest[]) => void;
@@ -74,6 +78,9 @@ export function Conversation({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [slashHighlight, setSlashHighlight] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const atBottomRef = useRef(true);
@@ -86,6 +93,8 @@ export function Conversation({
   );
   const selectedModel = modelFor(models, preferences.model);
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
+  const slashParsed = parseSlash(text);
+  const slashMatches = filterSlashCommands(slashParsed && !slashParsed.escaped ? slashParsed.command : "");
 
   useEffect(() => {
     const query = window.matchMedia("(max-width: 820px)");
@@ -93,6 +102,21 @@ export function Conversation({
     query.addEventListener("change", onChange);
     return () => query.removeEventListener("change", onChange);
   }, []);
+
+  // 输入以 / 开头时弹出命令菜单；退出斜杠状态时收起并复位
+  useEffect(() => {
+    if (slashParsed && !slashParsed.escaped) {
+      if (!slashDismissed) {
+        setSlashMenuOpen(true);
+        setSlashHighlight(0);
+      }
+    } else {
+      setSlashMenuOpen(false);
+      setSlashDismissed(false);
+      setSlashHighlight(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text]);
 
   // 输入框高度随内容自适应：默认单行，最多 150px
   useEffect(() => {
@@ -146,11 +170,14 @@ export function Conversation({
     }
   }, [efforts, onPreferencesChange, preferences, selectedModel]);
 
-  const send = async () => {
-    if (!text.trim() || active || sending) return;
+  const send = async (override?: string) => {
+    const requestText = (override ?? text).trim();
+    if (!requestText || active || sending) {
+      if (active && requestText) onError("任务进行中：可等待完成、点击取消按钮停止，或用 /steer 追加指令");
+      return;
+    }
     setSending(true);
     onError("");
-    const requestText = text.trim();
     try {
       const result = await api.startTurn(thread.id, { text: requestText, ...preferences });
       const turn = result.turn
@@ -171,6 +198,106 @@ export function Conversation({
     } finally {
       setSending(false);
     }
+  };
+
+  const runSlashCommand = async (command: SlashCommand, args: string) => {
+    onError("");
+    if (command.kind === "rpc") {
+      try {
+        await api.runCommand(thread.id, command.name, args || undefined);
+      } catch (reason) {
+        onError(errorMessage(reason));
+      }
+      return;
+    }
+    switch (command.name) {
+      case "help":
+        setSlashDismissed(false);
+        setSlashHighlight(0);
+        setSlashMenuOpen(true);
+        setText("");
+        break;
+      case "new":
+        onNewThread();
+        setText("");
+        break;
+      case "clear":
+        setText("");
+        break;
+      case "model": {
+        const query = args.toLowerCase();
+        const match = models.find(
+          (model) =>
+            model.model.toLowerCase().includes(query) ||
+            model.displayName.toLowerCase().includes(query) ||
+            model.id.toLowerCase().includes(query),
+        );
+        if (!match) {
+          onError("未找到匹配的模型，可用 /help 查看模型选择器");
+          return;
+        }
+        onPreferencesChange({ ...preferences, model: match.model, effort: match.defaultReasoningEffort });
+        setText("");
+        break;
+      }
+      case "effort": {
+        const query = args.toLowerCase();
+        const match = efforts.find((entry) => entry.reasoningEffort.startsWith(query) || entry.reasoningEffort === query);
+        if (!match) {
+          onError(`未找到匹配的思考强度，可选：${efforts.map((entry) => entry.reasoningEffort).join("、")}`);
+          return;
+        }
+        onPreferencesChange({ ...preferences, effort: match.reasoningEffort });
+        setText("");
+        break;
+      }
+      case "access":
+        onPreferencesChange({ ...preferences, fullAccess: !preferences.fullAccess });
+        setText("");
+        break;
+      default:
+        onError(`命令 /${command.name} 暂不可用`);
+    }
+  };
+
+  const selectSlashCommand = (command: SlashCommand) => {
+    if (command.needsArg) {
+      // 回填 /name ␣ 并聚焦，等待用户输入参数
+      setText(`/${command.name} `);
+      setSlashDismissed(false);
+      setSlashMenuOpen(true);
+      composerRef.current?.focus();
+      return;
+    }
+    setSlashMenuOpen(false);
+    setText("");
+    void runSlashCommand(command, "");
+  };
+
+  const submit = () => {
+    const parsed = parseSlash(text);
+    if (parsed?.escaped) {
+      // //xxx → 作为普通消息发送（去掉一个斜杠）
+      void send(parsed.args);
+      return;
+    }
+    if (parsed) {
+      const command = matchSlashCommand(parsed.command);
+      if (command) {
+        if (command.needsArg && !parsed.args) {
+          setText(`/${command.name} `);
+          setSlashDismissed(false);
+          setSlashMenuOpen(true);
+          composerRef.current?.focus();
+          return;
+        }
+        setSlashMenuOpen(false);
+        setText("");
+        void runSlashCommand(command, parsed.args);
+        return;
+      }
+    }
+    void send();
   };
 
   const cancel = async () => {
@@ -272,11 +399,43 @@ export function Conversation({
 
       <footer className="composer-shell">
         <div className="composer">
+          <button
+            type="button"
+            className="slash-button"
+            title="斜杠命令"
+            aria-label="斜杠命令"
+            aria-expanded={slashMenuOpen}
+            onClick={() => {
+              setSlashDismissed(false);
+              setSlashHighlight(0);
+              setSlashMenuOpen((current) => !current);
+            }}
+          >
+            <Slash size={16} />
+          </button>
           <textarea
             ref={composerRef}
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
+              if (event.key === "Escape" && slashMenuOpen) {
+                event.preventDefault();
+                setSlashMenuOpen(false);
+                setSlashDismissed(true);
+                return;
+              }
+              if (slashMenuOpen && slashMatches.length > 0) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSlashHighlight((current) => (current + 1) % slashMatches.length);
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSlashHighlight((current) => (current - 1 + slashMatches.length) % slashMatches.length);
+                  return;
+                }
+              }
               if (event.key !== "Enter") return;
               // 中文输入法选词期间的回车不触发发送
               if (event.nativeEvent.isComposing) return;
@@ -284,14 +443,19 @@ export function Conversation({
                 // 移动端：回车换行（默认行为），发送按钮负责发送
                 return;
               }
-              // 电脑端：Enter 发送，Shift+Enter 走默认换行
-              if (!event.shiftKey) {
-                event.preventDefault();
-                void send();
+              if (event.shiftKey) return; // Shift+Enter 换行
+              event.preventDefault();
+              if (slashMenuOpen && !slashParsed && slashMatches.length > 0) {
+                // 命令按钮弹出的菜单：回车执行高亮命令
+                const highlighted = slashMatches[slashHighlight];
+                if (highlighted) {
+                  selectSlashCommand(highlighted);
+                  return;
+                }
               }
+              submit();
             }}
-            placeholder={active ? "任务进行中" : isMobileLayout ? "输入需求，回车换行" : "发送新的需求"}
-            disabled={active}
+            placeholder={active ? "任务进行中（可用 /steer 追加指令）" : isMobileLayout ? "输入需求，回车换行" : "发送新的需求"}
             rows={1}
           />
           {active ? (
@@ -305,11 +469,36 @@ export function Conversation({
               {cancelling ? <LoaderCircle className="spin" size={18} /> : <Square size={16} />}
             </button>
           ) : (
-            <button className="send-button" onClick={() => void send()} disabled={sending || !text.trim()} title="发送">
+            <button className="send-button" onClick={() => submit()} disabled={sending || !text.trim()} title="发送">
               {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
             </button>
           )}
         </div>
+        {slashMenuOpen && (
+          <div className="slash-menu" role="listbox" aria-label="斜杠命令">
+            {slashMatches.length === 0 ? (
+              <div className="slash-menu-empty">没有匹配的命令（以 // 开头可发送原文）</div>
+            ) : (
+              slashMatches.map((command, index) => (
+                <button
+                  key={command.name}
+                  type="button"
+                  role="option"
+                  aria-selected={index === slashHighlight}
+                  className={`slash-item ${index === slashHighlight ? "highlighted" : ""}`}
+                  onMouseEnter={() => setSlashHighlight(index)}
+                  onClick={() => selectSlashCommand(command)}
+                >
+                  <span className="slash-name">/{command.name}</span>
+                  <span className="slash-desc">
+                    {command.description}
+                    {command.usage ? ` — ${command.usage}` : ""}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
       </footer>
     </div>
   );

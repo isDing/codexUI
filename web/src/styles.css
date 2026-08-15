@@ -327,11 +327,19 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .new-thread-state h2 { margin: 3px 0 0; color: var(--ink); font-size: 15px; }
 .new-thread-state p { margin: 0; font-size: 12px; }
 
-.composer-shell { padding: 11px 18px 14px; background: #fff; border-top: 1px solid var(--line); }
-.composer { display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: end; gap: 8px; width: min(100%, 900px); margin: 0 auto; padding: 8px 8px 8px 12px; background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 2px 8px rgba(20,25,22,0.05); }
+.composer-shell { position: relative; padding: 11px 18px 14px; background: #fff; border-top: 1px solid var(--line); }
+.composer { display: grid; grid-template-columns: 30px minmax(0, 1fr) 38px; align-items: end; gap: 8px; width: min(100%, 900px); margin: 0 auto; padding: 8px 8px 8px 12px; background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 2px 8px rgba(20,25,22,0.05); }
 .composer:focus-within { border-color: #739f87; box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.08); }
 .composer textarea { width: 100%; min-height: 36px; max-height: 150px; padding: 4px 0; resize: none; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 13px; line-height: 1.55; }
 .composer textarea::placeholder { color: #9aa19d; }
+.slash-button { display: grid; place-items: center; width: 30px; height: 30px; margin-bottom: 3px; padding: 0; color: #6d756f; background: transparent; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+.slash-button:hover { color: var(--ink); background: #ecefed; }
+.slash-menu { position: absolute; z-index: 40; right: 18px; bottom: calc(100% - 4px); left: 18px; display: grid; gap: 2px; width: min(calc(100% - 36px), 900px); max-height: min(320px, 42vh); margin: 0 auto; padding: 6px; overflow-y: auto; background: #fff; border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 8px 28px rgba(20, 25, 22, 0.16); }
+.slash-item { display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 7px 10px; color: var(--ink); background: transparent; border: 0; border-radius: 5px; text-align: left; cursor: pointer; }
+.slash-item.highlighted { background: var(--panel-soft); }
+.slash-name { flex: 0 0 auto; min-width: 92px; color: #176c43; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700; }
+.slash-desc { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.slash-menu-empty { padding: 9px 11px; color: var(--muted); font-size: 11.5px; }
 .send-button { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; color: #fff; background: var(--dark); border: 0; border-radius: 5px; cursor: pointer; }
 .send-button:disabled { opacity: 0.55; cursor: default; }
 .cancel-button { background: #8d312c; }

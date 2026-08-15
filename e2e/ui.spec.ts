@@ -209,9 +209,9 @@ test("a running request can be cancelled and the composer re-enables", async ({ 
   await page.keyboard.press("Enter");
   await expect(page.locator(".user-message .message-body").filter({ hasText: cancelEcho })).toBeVisible();
 
-  // 发送后：输入框禁用，出现取消按钮
-  await expect(composerArea).toBeDisabled();
-  await expect(composerArea).toHaveAttribute("placeholder", "任务进行中");
+  // 发送后：出现取消按钮，输入框提示任务进行中（输入框仍可输入以使用 /steer）
+  await expect(composerArea).toHaveAttribute("placeholder", /任务进行中/);
+  await expect(page.getByTitle("发送")).toHaveCount(0);
   const cancelButton = page.getByRole("button", { name: "取消任务" });
   await expect(cancelButton).toBeVisible();
 
@@ -222,6 +222,75 @@ test("a running request can be cancelled and the composer re-enables", async ({ 
   await expect(page.locator(".interrupted-note").first()).toBeVisible();
   await page.unroute("**/api/threads/*/turns");
   await page.unroute("**/api/threads/*/cancel");
+});
+
+test("slash commands: menu, execute, argument backfill, and // escape", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  let lastCommand: { command?: string; args?: string } = {};
+  await page.route("**/api/threads/*/command", async (route) => {
+    lastCommand = (route.request().postDataJSON() ?? {}) as { command?: string; args?: string };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.route("**/api/threads/*/turns", async (route) => {
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        turn: {
+          id: "e2e-slash-turn",
+          items: [{ id: "e2e-slash-final", type: "agentMessage", phase: "final_answer", text: "E2E 斜杠测试回答" }],
+          status: "inProgress",
+          error: null,
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: null,
+          durationMs: null,
+        },
+      }),
+    });
+  });
+
+  const composerArea = page.locator(".composer textarea");
+  const menu = page.locator(".slash-menu");
+  const initialUserMessages = await page.locator(".user-message").count();
+
+  // 输入 / 弹出菜单且包含多个候选
+  await composerArea.fill("/");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator(".slash-item")).toHaveCount(11);
+
+  // /clear 回车执行：清空输入、关闭菜单、不发送消息
+  await composerArea.fill("/clear");
+  await page.keyboard.press("Enter");
+  await expect(composerArea).toHaveValue("");
+  await expect(menu).toHaveCount(0);
+  await expect(page.locator(".user-message")).toHaveCount(initialUserMessages);
+
+  // 命令按钮：点击打开完整菜单；点击带参数命令回填 /rename ␣
+  await page.getByRole("button", { name: "斜杠命令", exact: true }).click();
+  await expect(menu).toBeVisible();
+  await menu.locator(".slash-item").filter({ hasText: "/rename" }).click();
+  await expect(composerArea).toHaveValue("/rename ");
+  await expect(composerArea).toBeFocused();
+
+  // /archive 回车执行：请求服务端 command 端点且不发消息
+  await composerArea.fill("/archive");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => lastCommand.command).toBe("archive");
+  await expect(composerArea).toHaveValue("");
+  await expect(page.locator(".user-message")).toHaveCount(initialUserMessages);
+
+  // // 转义：//archive 作为普通消息发送（去掉一个斜杠）
+  await composerArea.fill("//archive");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".user-message .message-body").filter({ hasText: "/archive" })).toBeVisible();
+
+  await page.unroute("**/api/threads/*/command");
+  await page.unroute("**/api/threads/*/turns");
 });
 
 test("conversation view stays position-stable while older history loads", async ({ page }) => {

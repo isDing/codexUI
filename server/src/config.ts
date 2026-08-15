@@ -1,9 +1,21 @@
+import fs from "node:fs";
 import path from "node:path";
 
 const required = (name: string, fallback?: string): string => {
   const value = process.env[name] ?? fallback;
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
   return value;
+};
+
+const readPackageVersion = (): string => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 };
 
 const splitPaths = (value: string): string[] =>
@@ -28,6 +40,7 @@ export const loadConfig = () => ({
   secureCookies: process.env.SECURE_COOKIES !== "false",
   trustProxy: process.env.TRUST_PROXY === "true",
   pollIntervalMs: Number(process.env.CODEX_POLL_INTERVAL_MS ?? 3000),
+  appVersion: readPackageVersion(),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;

@@ -113,10 +113,14 @@ const persistedSettingsFromLine = (line: string): JsonObject | null => {
 
 type PersistedSettingsResult = ThreadPreferences | null;
 
+const PENDING_THREAD_TTL_MS = 5 * 60_000;
+const MAX_PERSISTED_SETTINGS_SCAN_BYTES = 2 * 1024 * 1024;
+
 export class CodexService extends EventEmitter {
   private readonly rpc: CodexAppServer;
   private readonly threads = new Map<string, CodexThread>();
   private readonly pendingThreads = new Map<string, CodexThread>();
+  private readonly pendingSince = new Map<string, number>();
   private models: CodexModel[] = [];
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
@@ -135,14 +139,21 @@ export class CodexService extends EventEmitter {
     this.rpc.on("status", (status: { connected: boolean; message: string }) => {
       this.connected = status.connected;
       this.broadcast("connection", status);
+      // 断线重连后模型列表可能仍为空，主动补拉一次
+      if (status.connected) void this.refreshModels().catch((error) => console.warn("Failed to refresh models:", error));
     });
     this.rpc.on("diagnostic", (line: string) => console.warn(`[codex] ${line}`));
   }
 
+  get codexConnected(): boolean {
+    return this.connected;
+  }
+
   async start(): Promise<void> {
+    // 轮询先于连接启动：即使首次连接失败，连接恢复后轮询也能自动接管
+    this.pollTimer = setInterval(() => void this.refreshThreads(true), this.config.pollIntervalMs);
     await this.rpc.start();
     await Promise.all([this.refreshThreads(false), this.refreshModels()]);
-    this.pollTimer = setInterval(() => void this.refreshThreads(true), this.config.pollIntervalMs);
   }
 
   async stop(): Promise<void> {
@@ -177,16 +188,10 @@ export class CodexService extends EventEmitter {
     const archived = this.threads.get(metadata.id)?.archived ?? false;
     const thread = { ...metadata, archived, turns: history.turns };
     this.threads.set(metadata.id, { ...metadata, archived, turns: [] });
+    // 读取会话不再调用 thread/resume：读操作应保持无副作用，
+    // resume 只在真正发起 turn 时使用（见 startTurn）。
     const fallback = this.db.getPreferences(threadId);
-    let preferences = (await this.readPersistedPreferences(thread, fallback)) ?? fallback;
-    if (!preferences.model || !preferences.effort) {
-      try {
-        const runtime = await this.rpc.request<RuntimeSettings>("thread/resume", { threadId });
-        preferences = preferencesFromRuntimeSettings(runtime, preferences);
-      } catch {
-        // Active writers cannot be resumed from this app-server; persisted settings remain authoritative.
-      }
-    }
+    const preferences = (await this.readPersistedPreferences(thread, fallback)) ?? fallback;
     this.db.setPreferences(threadId, preferences);
     return { thread, preferences, nextCursor: history.nextCursor };
   }
@@ -229,6 +234,7 @@ export class CodexService extends EventEmitter {
     this.db.setPreferences(value.thread.id, preferences);
     this.threads.set(value.thread.id, { ...value.thread, archived: false });
     this.pendingThreads.set(value.thread.id, value.thread);
+    this.pendingSince.set(value.thread.id, Date.now());
     this.broadcast("threads.changed", { thread: value.thread });
     return { thread: value.thread, preferences };
   }
@@ -292,6 +298,7 @@ export class CodexService extends EventEmitter {
       },
     });
     this.pendingThreads.delete(threadId);
+    this.pendingSince.delete(threadId);
     return result;
   }
 
@@ -378,7 +385,17 @@ export class CodexService extends EventEmitter {
       }
 
       for (const [threadId, thread] of this.pendingThreads) {
-        if (!next.has(threadId)) next.set(threadId, { ...thread, archived: false });
+        if (next.has(threadId)) {
+          // 已进入 Codex 状态库，升级为普通会话
+          this.pendingThreads.delete(threadId);
+          this.pendingSince.delete(threadId);
+        } else if (Date.now() - (this.pendingSince.get(threadId) ?? Date.now()) >= PENDING_THREAD_TTL_MS) {
+          // 创建失败或从未落库的会话：超时移除，避免永久驻留内存与界面
+          this.pendingThreads.delete(threadId);
+          this.pendingSince.delete(threadId);
+        } else {
+          next.set(threadId, { ...thread, archived: false });
+        }
       }
 
       let changed = next.size !== this.threads.size;
@@ -417,6 +434,7 @@ export class CodexService extends EventEmitter {
       const thread = this.threads.get(threadId);
       if (thread) thread.status = { type: "active" };
       this.pendingThreads.delete(threadId);
+      this.pendingSince.delete(threadId);
     }
     if (message.method === "thread/settings/updated" && threadId && isRecord(params.threadSettings)) {
       const preferences = preferencesFromRuntimeSettings(params.threadSettings, this.db.getPreferences(threadId));
@@ -463,9 +481,12 @@ export class CodexService extends EventEmitter {
         const size = (await file.stat()).size;
         let position = size;
         let pending = Buffer.alloc(0);
+        let scanned = 0;
         while (position > 0) {
+          if (scanned >= MAX_PERSISTED_SETTINGS_SCAN_BYTES) return null;
           const length = Math.min(chunkSize, position);
           position -= length;
+          scanned += length;
           const buffer = Buffer.allocUnsafe(length);
           await file.read(buffer, 0, length, position);
           const data = Buffer.concat([buffer, pending]);

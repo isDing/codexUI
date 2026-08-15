@@ -20,9 +20,14 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=build /app/node_modules ./node_modules
+# 运行时只安装生产依赖，避免把 typescript/vitest/vite 等构建工具装进镜像
 COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/package-lock.json ./package-lock.json
 COPY --from=build /app/server/package.json ./server/package.json
+COPY --from=build /app/web/package.json ./web/package.json
+RUN mkdir -p server web \
+  && npm ci --omit=dev --workspace=@codex-ui/server \
+  && npm cache clean --force
 COPY --from=build /app/server/dist ./server/dist
 COPY --from=build /app/web/dist ./web/dist
 

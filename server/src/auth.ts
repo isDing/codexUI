@@ -32,8 +32,8 @@ export const parseCookies = (header: string | undefined): Record<string, string>
   );
 };
 
-export const sessionCookie = (token: string, secure: boolean): string =>
-  `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=14400${secure ? "; Secure" : ""}`;
+export const sessionCookie = (token: string, secure: boolean, idleMs: number): string =>
+  `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(1, Math.floor(idleMs / 1000))}${secure ? "; Secure" : ""}`;
 
 export const expiredSessionCookie = (secure: boolean): string =>
   `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? "; Secure" : ""}`;

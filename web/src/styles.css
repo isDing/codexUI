@@ -118,6 +118,14 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 }
 .icon-button:hover { background: #e8ece9; border-color: var(--line); }
 
+.approval-indicator { position: relative; color: var(--muted); }
+.approval-indicator.highlighted { color: #9a6a1f; background: var(--amber-soft); border-color: #edd1a0; }
+.approval-indicator .count-badge { position: absolute; top: -5px; right: -7px; height: 17px; min-width: 17px; padding: 0 4px; font-size: 10px; line-height: 17px; }
+.approval-dialog { width: min(560px, calc(100vw - 28px)); }
+.approval-dialog .dialog-body { padding: 14px; }
+.approval-dialog .approval-bar { border-top: 0; border-radius: 8px; border: 1px solid #eacb96; }
+.approval-empty { margin: 0; color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0; }
+
 .app-shell {
   display: grid;
   grid-template-columns: 222px 290px minmax(0, 1fr);
@@ -244,6 +252,9 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .history-stream { width: min(100%, 900px); min-height: 100%; margin: 0 auto; padding: 22px 26px 38px; }
 .history-loading { display: flex; align-items: center; justify-content: center; gap: 9px; height: 100%; color: var(--muted); font-size: 13px; }
 .history-progress { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 28px; margin: -10px 0 12px; color: var(--muted); font-size: 10.5px; }
+.load-older-button { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 30px; margin: -8px 0 16px; color: var(--muted); background: transparent; border: 1px dashed var(--line-strong); border-radius: 6px; font-size: 11px; cursor: pointer; }
+.load-older-button:hover:not(:disabled) { color: var(--ink); background: var(--panel-soft); }
+.load-older-button:disabled { opacity: 0.5; cursor: default; }
 .turn-block { display: grid; gap: 13px; margin-bottom: 25px; }
 .message { display: grid; gap: 7px; max-width: 88%; }
 .user-message { justify-self: end; }

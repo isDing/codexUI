@@ -48,7 +48,12 @@ export class CodexAppServer extends EventEmitter {
     const current = this.process;
     this.process = null;
     this.readyPromise = null;
-    if (current && !current.killed) current.kill("SIGTERM");
+    if (current && current.exitCode === null && current.signalCode === null) {
+      const exited = new Promise<void>((resolve) => current.once("exit", () => resolve()));
+      current.kill("SIGTERM");
+      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+    }
     this.rejectPending(new Error("Codex app-server stopped"));
   }
 
@@ -82,10 +87,19 @@ export class CodexAppServer extends EventEmitter {
       this.handleExit(new Error(`Codex app-server exited (${code ?? signal ?? "unknown"})`));
     });
 
-    await this.sendRequest("initialize", {
-      clientInfo: { name: "codex_ui", title: "Codex UI", version: "1.0.4" },
-      capabilities: { experimentalApi: true },
-    });
+    try {
+      await this.sendRequest("initialize", {
+        clientInfo: { name: "codex_ui", title: "Codex UI", version: this.config.appVersion },
+        capabilities: { experimentalApi: true },
+      });
+    } catch (error) {
+      // 握手失败但子进程可能仍然存活：必须清理状态并走统一的重启路径，
+      // 否则 rejected 的 readyPromise 会让后续所有请求永久失败。
+      const message = error instanceof Error ? error : new Error(String(error));
+      if (!child.killed && child.exitCode === null) child.kill("SIGTERM");
+      this.handleExit(message);
+      throw message;
+    }
     this.write({ method: "initialized", params: {} });
     this.restartDelayMs = 1_000;
     this.emit("status", { connected: true, message: "Codex 已连接" });

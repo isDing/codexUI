@@ -14,6 +14,37 @@ async function login(page: Page) {
   await expect(page.getByText("Codex 在线")).toBeVisible();
 }
 
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** 选择第一个「会话数不为 0」的工作区，并返回其路径（不依赖任何硬编码数据）。 */
+async function openFirstPopulatedWorkspace(page: Page): Promise<string> {
+  const rows = page.locator(".workspace-row");
+  await expect(rows.first()).toBeVisible();
+  const path = await rows.evaluateAll((elements: HTMLElement[]) => {
+    const row = elements.find((element) => {
+      const badge = element.querySelector<HTMLElement>(".count-badge")?.textContent?.trim() ?? "0";
+      return badge !== "0";
+    });
+    return row?.querySelector<HTMLElement>(".workspace-copy small")?.textContent?.trim() ?? "";
+  });
+  if (!path) throw new Error("测试实例上没有包含会话的工作区");
+  // 路径完全相等匹配，避免 /home/user/code 同时命中其子目录
+  const row = page.locator(".workspace-row").filter({
+    has: page.locator(".workspace-copy small", { hasText: new RegExp(`^${escapeRegExp(path)}$`) }),
+  });
+  await expect(row).toHaveCount(1);
+  await row.click();
+  return path;
+}
+
+/** 选择第一个非进行中的会话（进行中的会话无法发送消息）。 */
+async function openFirstIdleThread(page: Page) {
+  const thread = page.locator(".thread-row").filter({ hasNot: page.locator(".active-icon") }).first();
+  await expect(thread).toBeVisible();
+  await thread.click();
+  await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
+}
+
 test("desktop login, thread navigation, and history rendering", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 920 });
   await page.goto("/");
@@ -23,46 +54,57 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.getByText("Codex 在线")).toBeVisible();
-  await expect(page.getByText("v1.0.4", { exact: true })).toBeVisible();
+  await expect(page.locator(".app-version").first()).toHaveText(/^v\d+\.\d+\.\d+$/);
   await expect(page.getByRole("navigation", { name: "工作区" })).toBeVisible();
 
-  await page.locator(".workspace-row").filter({ hasText: "/home/user/code/agent" }).click();
-  const thread = page.locator(".thread-row").first();
-  await expect(thread).toBeVisible();
-  await thread.click();
-  await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
-  await expect(page.locator(".message").first()).toBeVisible();
-  await expect(page.locator(".agent-message .markdown-body").first()).toBeVisible();
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+
+  // 历史渲染：空会话显示新会话占位，否则至少有一条消息
+  await expect(page.locator(".message, .new-thread-state").first()).toBeVisible();
+  const agentBody = page.locator(".agent-message .markdown-body");
+  if ((await agentBody.count()) > 0) await expect(agentBody.first()).toBeVisible();
+
+  // 过程展开/收起
   const processDetails = page.locator("details.reasoning-item, details.tool-item, details.commentary-message");
   const openProcessDetails = page.locator("details.reasoning-item[open], details.tool-item[open], details.commentary-message[open]");
   expect(await processDetails.count()).toBe(0);
   await page.getByRole("button", { name: "展开过程" }).click();
   await expect(page.getByRole("button", { name: "收起过程" })).toBeVisible();
   const processCount = await processDetails.count();
-  expect(processCount).toBeGreaterThan(0);
-  await expect.poll(() => openProcessDetails.count()).toBe(processCount);
-  await expect(processDetails.first()).toBeVisible();
+  if (processCount > 0) {
+    await expect.poll(() => openProcessDetails.count()).toBe(processCount);
+    await expect(processDetails.first()).toBeVisible();
+  }
   await page.getByRole("button", { name: "收起过程" }).click();
   await expect.poll(() => processDetails.count()).toBe(0);
   await page.screenshot({ path: "test-results/conversation-desktop.png", fullPage: true });
 
-  await page.getByRole("button", { name: "code /home/user/code" }).click();
-  await page.locator(".thread-row").filter({ hasText: "在这个目录下新建" }).first().click();
-  await expect(page.locator(".session-controls select").first()).toHaveValue("gpt-5.6-sol");
-  await expect(page.locator(".session-controls select").nth(1)).toHaveValue("xhigh");
-  await expect(page.locator(".access-toggle input")).toBeChecked();
+  // 记录当前会话的偏好设置与所在工作区
+  const modelValue = await page.locator(".session-controls select").first().inputValue();
+  const effortValue = await page.locator(".session-controls select").nth(1).inputValue();
+  const fullAccess = await page.locator(".access-toggle input").isChecked();
+  const workspacePath = await page.locator(".workspace-row.selected .workspace-copy small").textContent();
 
+  // 刷新后：选中项与偏好设置应完整恢复
   await page.reload();
   await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
-  await expect(page.locator(".workspace-row.selected").filter({ hasText: "/home/user/code" })).toBeVisible();
-  await expect(page.locator(".thread-row.selected").filter({ hasText: "在这个目录下新建" })).toBeVisible();
+  await expect(page.locator(".workspace-row.selected")).toHaveCount(1);
+  await expect(page.locator(".workspace-row.selected .workspace-copy small")).toHaveText(workspacePath?.trim() ?? "");
+  await expect(page.locator(".thread-row.selected")).toHaveCount(1);
+  await expect(page.locator(".session-controls select").first()).toHaveValue(modelValue);
+  await expect(page.locator(".session-controls select").nth(1)).toHaveValue(effortValue);
+  await expect(page.locator(".access-toggle input")).toBeChecked({ checked: fullAccess });
+
+  // 新建会话对话框默认选中当前工作区
   await page.getByRole("button", { name: "新建会话" }).click();
-  await expect(page.locator(".dialog select").first()).toHaveValue("/home/user/code");
+  await expect(page.locator(".dialog select").first()).toHaveValue(workspacePath?.trim() ?? "");
   await page.getByRole("button", { name: "取消" }).click();
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 
+  // 模拟发送：拦截 turn 创建请求，验证用户消息回显与最终回答渲染顺序
   await page.route("**/api/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
@@ -100,10 +142,10 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {
   await expect(page.getByRole("dialog", { name: "新增工作区" })).toBeVisible();
   await expect(page.getByLabel("工作区路径")).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await page.locator(".workspace-row").filter({ hasText: "/home/user/code/agent" }).click();
+  await openFirstPopulatedWorkspace(page);
   await expect(page.locator(".thread-sidebar.drawer-open")).toBeVisible();
   await page.locator(".thread-row").first().click();
-  await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
+  await expect(page.locator(".message, .new-thread-state").first()).toBeVisible();
   await page.screenshot({ path: "test-results/conversation-mobile.png", fullPage: true });
 
   const dimensions = await page.evaluate(() => ({

@@ -127,6 +127,7 @@ describe("thread history pagination", () => {
       secureCookies: false,
       trustProxy: false,
       pollIntervalMs: 3_000,
+      appVersion: "test",
     };
     const turn = (id: string): CodexTurn => ({
       id,
@@ -218,6 +219,7 @@ describe("new thread materialization", () => {
       secureCookies: false,
       trustProxy: false,
       pollIntervalMs: 3_000,
+      appVersion: "test",
     };
     const service = new CodexService(config, db);
     const thread: CodexThread = {

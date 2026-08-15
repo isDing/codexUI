@@ -84,6 +84,24 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
   );
   app.use(express.json({ limit: "2mb" }));
 
+  // 请求日志：记录方法、路径、状态码与耗时（跳过健康检查噪音）
+  app.use((request: Request, response: Response, next: () => void) => {
+    if (request.path === "/api/health") {
+      next();
+      return;
+    }
+    if (!request.path.startsWith("/api") && request.path !== "/") {
+      next();
+      return;
+    }
+    const started = process.hrtime.bigint();
+    response.on("finish", () => {
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      console.log(`${request.method} ${request.originalUrl} ${response.statusCode} ${ms.toFixed(1)}ms ip=${request.ip ?? "-"}`);
+    });
+    next();
+  });
+
   const originGuard = (request: Request, response: Response, next: () => void): void => {
     const origin = request.headers.origin;
     if (origin && origin !== config.allowedOrigin) {
@@ -116,7 +134,7 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     attempts.delete(address);
     db.purgeExpiredSessions(now, config.sessionIdleMs);
     const session = createSession(db, config, now);
-    response.setHeader("Set-Cookie", sessionCookie(session.token, config.secureCookies));
+    response.setHeader("Set-Cookie", sessionCookie(session.token, config.secureCookies, config.sessionIdleMs));
     response.json({ authenticated: true, username: config.adminUser, csrfToken: session.csrfToken, expiresAt: now + config.sessionIdleMs });
   });
 
@@ -138,7 +156,7 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     const now = Date.now();
     touch(request, db);
     const token = parseCookies(request.headers.cookie)[SESSION_COOKIE];
-    if (token) response.setHeader("Set-Cookie", sessionCookie(token, config.secureCookies));
+    if (token) response.setHeader("Set-Cookie", sessionCookie(token, config.secureCookies, config.sessionIdleMs));
     response.json({ expiresAt: now + config.sessionIdleMs });
   });
 
@@ -261,12 +279,31 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     }
   });
 
-  app.get("/api/health", (_request, response) => response.json({ ok: true, service: "codex-ui" }));
+  app.get("/api/health", (_request, response) =>
+    response.json({ ok: true, service: "codex-ui", codexConnected: service.codexConnected }),
+  );
+
+  // 未匹配的 API 路由返回 JSON 404，避免落到 SPA 兜底返回 HTML
+  app.use("/api", (_request: Request, response: Response) => {
+    response.status(404).json({ error: "接口不存在" });
+  });
 
   const staticDir = path.resolve(process.env.WEB_DIST ?? fileURLToPath(new URL("../../web/dist", import.meta.url)));
   if (fs.existsSync(staticDir)) {
-    app.use(express.static(staticDir, { index: "index.html", maxAge: config.nodeEnv === "production" ? "1h" : 0 }));
-    app.get("*splat", (_request, response) => response.sendFile(path.join(staticDir, "index.html")));
+    // 带哈希的资源文件可长期缓存；index.html 与 SPA 路由回退一律不缓存，保证发版后立即生效
+    app.use("/assets", express.static(path.join(staticDir, "assets"), { maxAge: "1y", immutable: true }));
+    const sendIndex = (_request: Request, response: Response): void => {
+      response.setHeader("Cache-Control", "no-store");
+      response.sendFile(path.join(staticDir, "index.html"));
+    };
+    app.get("/", sendIndex);
+    app.get("*splat", (request: Request, response: Response) => {
+      if (request.path.startsWith("/api") || request.path.startsWith("/assets")) {
+        response.status(404).json({ error: "资源不存在" });
+        return;
+      }
+      sendIndex(request, response);
+    });
   }
 
   app.use((error: unknown, _request: Request, response: Response, _next: unknown) => {
@@ -277,11 +314,21 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
 };
 
 export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, service: CodexService) => {
-  const clients = new Map<WebSocket, { clientId: string; tokenHash: string }>();
+  const clients = new Map<WebSocket, { clientId: string; tokenHash: string; lastTouchAt: number }>();
   const wss = new WebSocketServer({ noServer: true });
 
   const send = (socket: WebSocket, message: unknown): void => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (socket.readyState !== WebSocket.OPEN) return;
+    // 正在接收推送的客户端视为活跃：节流续期，避免长时间观看任务输出时被登出
+    const client = clients.get(socket);
+    if (client) {
+      const now = Date.now();
+      if (now - client.lastTouchAt >= 30_000) {
+        client.lastTouchAt = now;
+        db.touchSession(client.tokenHash, now);
+      }
+    }
+    socket.send(JSON.stringify(message));
   };
   const broadcast = (message: unknown): void => {
     for (const socket of clients.keys()) send(socket, message);
@@ -295,7 +342,7 @@ export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, servi
       return;
     }
     const clientId = crypto.randomUUID();
-    const client = { clientId, tokenHash: resolved.tokenHash };
+    const client = { clientId, tokenHash: resolved.tokenHash, lastTouchAt: Date.now() };
     clients.set(socket, client);
     void service.snapshot().then((snapshot) => send(socket, { type: "snapshot", payload: snapshot }));
     send(socket, { type: "connection", payload: { connected: true, message: "实时连接已建立" } });

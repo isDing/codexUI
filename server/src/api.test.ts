@@ -39,6 +39,7 @@ describe("authentication API", () => {
       secureCookies: false,
       trustProxy: false,
       pollIntervalMs: 3_000,
+      appVersion: "test",
     };
     db = new AppDatabase(dataDir);
   });

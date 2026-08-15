@@ -26,9 +26,13 @@ server.listen(config.port, config.host, () => {
 
 const shutdown = async (signal: string): Promise<void> => {
   console.log(`Received ${signal}, shutting down`);
+  for (const client of websocket.wss.clients) client.close(1001, "服务器关闭");
+  websocket.wss.close();
   await service.stop();
   db.close();
   server.close(() => process.exit(0));
+  server.closeIdleConnections();
+  server.closeAllConnections();
   setTimeout(() => process.exit(1), 10_000).unref();
 };
 

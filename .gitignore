@@ -6,4 +6,5 @@ data/
 playwright-report/
 test-results/
 *.log
+*.tsbuildinfo
 

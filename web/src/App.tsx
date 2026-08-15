@@ -1,61 +1,43 @@
 import {
-  Archive,
-  Bot,
-  Check,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  CircleAlert,
-  CircleCheck,
-  CircleDot,
   Code2,
-  FileCode2,
+  CircleAlert,
   Folder,
-  Folders,
   FolderPlus,
+  Folders,
   LoaderCircle,
   LockKeyhole,
   LogOut,
-  Menu,
-  MessageSquare,
   MessagesSquare,
-  PanelLeft,
   Plus,
   Search,
-  Send,
   Server,
   ShieldAlert,
-  TerminalSquare,
   User,
-  Wrench,
   X,
 } from "lucide-react";
-import webPackage from "../package.json";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
-  Fragment,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
-  type ReactNode,
 } from "react";
+import webPackage from "../package.json";
 import { ApiClient } from "./api";
-import type {
-  AuthState,
-  Model,
-  PendingRequest,
-  Preferences,
-  Snapshot,
-  Thread,
-  ThreadItem,
-  Turn,
-  Workspace,
-} from "./types";
+import { EmptyConversation, IconButton, LoadingScreen, SidebarHeading, ThreadRow } from "./components";
+import { ApprovalBar, Conversation } from "./conversation";
+import { NewThreadDialog, WorkspaceDialog } from "./dialogs";
+import {
+  errorMessage,
+  isRecord,
+  mergeHistoricalTurns,
+  mergeTurn,
+  normalizePreferences,
+  threadTitle,
+  userMessageText,
+} from "./lib";
+import type { AuthState, PendingRequest, Preferences, Snapshot, Thread, ThreadItem, Turn, Workspace } from "./types";
 
 const emptySnapshot: Snapshot = {
   connected: false,
@@ -134,15 +116,6 @@ export function App() {
   );
 }
 
-function LoadingScreen() {
-  return (
-    <main className="loading-screen" aria-label="正在载入">
-      <div className="brand-mark"><Code2 size={22} /></div>
-      <LoaderCircle className="spin" size={20} />
-    </main>
-  );
-}
-
 function LoginScreen({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
@@ -217,11 +190,13 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const [drawer, setDrawer] = useState<"workspaces" | "threads" | null>(null);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [approvalPanelOpen, setApprovalPanelOpen] = useState(false);
   const [search, setSearch] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const restoreThreadRef = useRef<string | null>(null);
   const detailRequestRef = useRef(0);
+  const autoHistoryRef = useRef(true);
 
   selectedRef.current = selectedThreadId;
 
@@ -359,6 +334,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     setHistoryLoading(false);
     setDetailLoading(true);
     setError("");
+    autoHistoryRef.current = true;
     socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: thread.id }));
     try {
       const [value, unread] = await Promise.all([api.readThread(thread.id), api.markRead(thread.id)]);
@@ -383,35 +359,41 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     void selectThread(thread);
   }, [detail, detailLoading, selectedThreadId, snapshot.threads]);
 
-  useEffect(() => {
+  const fetchOlderHistory = useCallback(() => {
     if (!detail || detailLoading || historyLoading || !historyCursor) return;
     const listStatus = snapshot.threads.find((entry) => entry.id === detail.id)?.status.type;
     if (detail.status.type === "active" || listStatus === "active") return;
     const threadId = detail.id;
     const cursor = historyCursor;
     const requestId = detailRequestRef.current;
-    const timer = window.setTimeout(() => {
-      setHistoryLoading(true);
-      void api
-        .readThreadHistory(threadId, cursor)
-        .then((page) => {
-          if (detailRequestRef.current !== requestId || selectedRef.current !== threadId) return;
-          setDetail((current) => current?.id === threadId
-            ? { ...current, turns: mergeHistoricalTurns(page.turns, current.turns) }
-            : current);
-          setHistoryCursor(page.nextCursor);
-        })
-        .catch((reason) => {
-          if (detailRequestRef.current !== requestId) return;
-          setHistoryCursor(null);
-          setError(`较早历史记录加载失败：${errorMessage(reason)}`);
-        })
-        .finally(() => {
-          if (detailRequestRef.current === requestId) setHistoryLoading(false);
-        });
-    }, 100);
-    return () => window.clearTimeout(timer);
-  }, [api, detail, detailLoading, historyCursor, historyLoading, selectedThreadId, snapshot.threads]);
+    setHistoryLoading(true);
+    void api
+      .readThreadHistory(threadId, cursor)
+      .then((page) => {
+        if (detailRequestRef.current !== requestId || selectedRef.current !== threadId) return;
+        setDetail((current) => current?.id === threadId
+          ? { ...current, turns: mergeHistoricalTurns(page.turns, current.turns) }
+          : current);
+        setHistoryCursor(page.nextCursor);
+      })
+      .catch((reason) => {
+        if (detailRequestRef.current !== requestId) return;
+        setHistoryCursor(null);
+        setError(`较早历史记录加载失败：${errorMessage(reason)}`);
+      })
+      .finally(() => {
+        if (detailRequestRef.current === requestId) setHistoryLoading(false);
+      });
+  }, [api, detail, detailLoading, historyCursor, historyLoading, snapshot.threads]);
+
+  // 打开会话后自动补一页较早记录；更多历史由「加载更早的记录」按钮按需拉取，
+  // 避免对超大会话产生无休止的顺序请求。
+  useEffect(() => {
+    if (!autoHistoryRef.current || !detail || detailLoading || historyLoading || !historyCursor) return;
+    if (detail.status.type === "active") return;
+    autoHistoryRef.current = false;
+    fetchOlderHistory();
+  }, [detail, detailLoading, fetchOlderHistory, historyCursor, historyLoading]);
 
   const workspaceThreads = useMemo(
     () =>
@@ -424,10 +406,17 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   );
 
   const selectedThread = snapshot.threads.find((thread) => thread.id === selectedThreadId) ?? detail;
+  const threadPending = snapshot.pendingRequests.filter((request) => request.params.threadId === selectedThread?.id);
+  const otherPending = snapshot.pendingRequests.filter((request) => request.params.threadId !== selectedThread?.id);
+
+  useEffect(() => {
+    if (approvalPanelOpen && otherPending.length === 0) setApprovalPanelOpen(false);
+  }, [approvalPanelOpen, otherPending.length]);
 
   const createThread = async (cwd: string, value: Preferences) => {
     const result = await api.createThread({ cwd, ...value });
     detailRequestRef.current += 1;
+    autoHistoryRef.current = false;
     setSnapshot((current) => ({
       ...current,
       threads: [result.thread, ...current.threads.filter((thread) => thread.id !== result.thread.id)],
@@ -485,6 +474,15 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
           <span className={`connection-pill ${snapshot.connected ? "online" : "offline"}`}>
             <span className="status-dot" />{snapshot.connected ? "Codex 在线" : "Codex 断开"}
           </span>
+          <button
+            className={`icon-button approval-indicator ${otherPending.length > 0 ? "highlighted" : ""}`}
+            title="其他会话的待处理请求"
+            aria-label={`待处理请求${otherPending.length > 0 ? `（${otherPending.length}）` : ""}`}
+            onClick={() => setApprovalPanelOpen(true)}
+          >
+            <ShieldAlert size={18} />
+            {otherPending.length > 0 && <span className="count-badge">{otherPending.length}</span>}
+          </button>
           <IconButton title="退出登录" onClick={() => void logout()}><LogOut size={18} /></IconButton>
         </div>
       </header>
@@ -539,7 +537,9 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         </nav>
       </aside>
 
-      {(drawer || newThreadOpen || workspaceDialogOpen) && <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); setWorkspaceDialogOpen(false); }} />}
+      {(drawer || newThreadOpen || workspaceDialogOpen || approvalPanelOpen) && (
+        <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); setWorkspaceDialogOpen(false); setApprovalPanelOpen(false); }} />
+      )}
 
       <section className="conversation-pane">
         {error && <div className="global-error"><CircleAlert size={17} />{error}<button onClick={() => setError("")} aria-label="关闭"><X size={16} /></button></div>}
@@ -553,9 +553,11 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             listThread={selectedThread}
             models={snapshot.models}
             preferences={preferences}
-            pendingRequests={snapshot.pendingRequests.filter((request) => request.params.threadId === selectedThread.id)}
+            pendingRequests={threadPending}
             loading={detailLoading}
             loadingOlder={historyLoading}
+            hasOlder={historyCursor !== null}
+            onLoadOlder={fetchOlderHistory}
             onTurnStarted={appendStartedTurn}
             onPreferencesChange={setPreferences}
             onError={setError}
@@ -580,6 +582,24 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
           onAdd={addWorkspace}
         />
       )}
+
+      {approvalPanelOpen && (
+        <section className="dialog approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title">
+          <header><div><ShieldAlert size={18} /><h2 id="approval-dialog-title">其他会话的待处理请求</h2></div><IconButton title="关闭" onClick={() => setApprovalPanelOpen(false)}><X size={18} /></IconButton></header>
+          <div className="dialog-body">
+            {otherPending.length === 0 ? (
+              <p className="approval-empty">当前没有待处理请求。</p>
+            ) : (
+              <ApprovalBar
+                api={api}
+                requests={otherPending}
+                onError={setError}
+                onRequestsChange={(pendingRequests) => updateSnapshot({ pendingRequests })}
+              />
+            )}
+          </div>
+        </section>
+      )}
     </main>
   );
 }
@@ -603,475 +623,6 @@ function useActivityRefresh(api: ApiClient, auth: AuthState, onAuthChange: (valu
       clearInterval(expiry);
     };
   }, [api, auth, onAuthChange]);
-}
-
-function SidebarHeading({ icon, title, onClose }: { icon: ReactNode; title: string; onClose: () => void }) {
-  return (
-    <header className="sidebar-heading">
-      <span>{icon}<strong>{title}</strong></span>
-      <button className="drawer-close" onClick={onClose} title="关闭"><X size={18} /></button>
-    </header>
-  );
-}
-
-function ThreadRow({ thread, selected, unread, onSelect }: { thread: Thread; selected: boolean; unread: boolean; onSelect: () => void }) {
-  return (
-    <button className={`thread-row ${selected ? "selected" : ""} ${unread ? "unread" : ""}`} onClick={onSelect}>
-      <span className="thread-title-line">
-        <strong>{threadTitle(thread)}</strong>
-        {thread.status.type === "active" && <LoaderCircle className="spin active-icon" size={15} />}
-        {thread.archived && <Archive size={14} />}
-        {unread && <span className="unread-dot" title="任务已完成" />}
-      </span>
-      <span className="thread-meta">
-        <span>{sourceLabel(thread.source)}</span>
-        <time>{relativeTime((thread.recencyAt ?? thread.updatedAt) * 1000)}</time>
-      </span>
-    </button>
-  );
-}
-
-function EmptyConversation({ onCreate, disabled }: { onCreate: () => void; disabled: boolean }) {
-  return (
-    <div className="empty-conversation">
-      <div className="empty-icon"><MessageSquare size={24} /></div>
-      <h2>选择一个会话</h2>
-      <p>历史记录与正在进行的任务会显示在这里。</p>
-      <button className="primary-button" onClick={onCreate} disabled={disabled}><Plus size={17} />新建会话</button>
-    </div>
-  );
-}
-
-function Conversation({
-  api,
-  thread,
-  listThread,
-  models,
-  preferences,
-  pendingRequests,
-  loading,
-  loadingOlder,
-  onTurnStarted,
-  onPreferencesChange,
-  onError,
-  onRequestsChange,
-}: {
-  api: ApiClient;
-  thread: Thread;
-  listThread: Thread;
-  models: Model[];
-  preferences: Preferences;
-  pendingRequests: PendingRequest[];
-  loading: boolean;
-  loadingOlder: boolean;
-  onTurnStarted: (threadId: string, turn: Turn) => void;
-  onPreferencesChange: (value: Preferences) => void;
-  onError: (value: string) => void;
-  onRequestsChange: (value: PendingRequest[]) => void;
-}) {
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const atBottomRef = useRef(true);
-  const scrollStateRef = useRef({ threadId: "", firstTurnId: "", lastTurnId: "", height: 0 });
-  const active = listThread.status.type === "active" || thread.status.type === "active";
-  const previousActiveRef = useRef(active);
-  const [processesOpen, setProcessesOpen] = useState(active);
-  const selectedModel = modelFor(models, preferences.model);
-  const efforts = selectedModel?.supportedReasoningEfforts ?? [];
-
-  useEffect(() => {
-    if (active === previousActiveRef.current) return;
-    previousActiveRef.current = active;
-    setProcessesOpen(active);
-  }, [active]);
-
-  useLayoutEffect(() => {
-    const details = scrollRef.current?.querySelectorAll<HTMLDetailsElement>(
-      "details.reasoning-item, details.commentary-message, details.tool-item",
-    );
-    details?.forEach((detail) => {
-      detail.open = processesOpen;
-    });
-  }, [processesOpen, thread.turns]);
-
-  useLayoutEffect(() => {
-    const scroller = scrollRef.current;
-    if (!scroller) return;
-    const previous = scrollStateRef.current;
-    const firstTurnId = thread.turns[0]?.id ?? "";
-    const lastTurnId = thread.turns.at(-1)?.id ?? "";
-    const prepended =
-      previous.threadId === thread.id &&
-      Boolean(previous.firstTurnId) &&
-      previous.firstTurnId !== firstTurnId &&
-      previous.lastTurnId === lastTurnId;
-
-    if (prepended) {
-      scroller.scrollTop += scroller.scrollHeight - previous.height;
-    } else if (previous.threadId !== thread.id || atBottomRef.current) {
-      scroller.scrollTop = scroller.scrollHeight;
-    }
-    atBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
-    scrollStateRef.current = { threadId: thread.id, firstTurnId, lastTurnId, height: scroller.scrollHeight };
-  }, [loadingOlder, thread.id, thread.turns]);
-
-  useEffect(() => {
-    if (selectedModel && !efforts.some((entry) => entry.reasoningEffort === preferences.effort)) {
-      onPreferencesChange({ ...preferences, model: selectedModel.model, effort: selectedModel.defaultReasoningEffort });
-    }
-  }, [efforts, onPreferencesChange, preferences, selectedModel]);
-
-  const send = async () => {
-    if (!text.trim() || active || sending) return;
-    setSending(true);
-    onError("");
-    const requestText = text.trim();
-    try {
-      const result = await api.startTurn(thread.id, { text: requestText, ...preferences });
-      const turn = result.turn
-        ? ensureUserMessage(result.turn, requestText)
-        : {
-            id: `local-${Date.now()}`,
-            items: [userMessageItem(requestText)],
-            status: "inProgress",
-            error: null,
-            startedAt: Math.floor(Date.now() / 1000),
-            completedAt: null,
-            durationMs: null,
-          };
-      onTurnStarted(thread.id, turn);
-      setText("");
-    } catch (reason) {
-      onError(errorMessage(reason));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <div className="conversation-layout">
-      <header className="conversation-header">
-        <div className="conversation-title">
-          <div className="conversation-state-icon">{active ? <LoaderCircle className="spin" size={18} /> : <MessageSquare size={18} />}</div>
-          <div><h1>{threadTitle(listThread)}</h1><p>{thread.cwd}</p></div>
-        </div>
-        <div className="session-controls">
-          <button
-            type="button"
-            className="process-toggle"
-            aria-label={processesOpen ? "收起过程" : "展开过程"}
-            aria-pressed={processesOpen}
-            title={processesOpen ? "收起全部思考、过程消息和工具调用" : "展开全部思考、过程消息和工具调用"}
-            onClick={() => setProcessesOpen((current) => !current)}
-          >
-            {processesOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />}
-            <span>{processesOpen ? "收起过程" : "展开过程"}</span>
-          </button>
-          <label title="选择模型">
-            <span>模型</span>
-            <select
-              value={preferences.model ?? selectedModel?.model ?? ""}
-              onChange={(event) => {
-                const model = modelFor(models, event.target.value);
-                onPreferencesChange({ ...preferences, model: event.target.value, effort: model?.defaultReasoningEffort ?? null });
-              }}
-            >
-              {models.map((model) => <option key={model.id} value={model.model} title={model.description}>{model.displayName}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-          <label title="选择思考强度">
-            <span>思考</span>
-            <select value={preferences.effort ?? ""} onChange={(event) => onPreferencesChange({ ...preferences, effort: event.target.value })}>
-              {efforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort} title={entry.description}>{effortLabel(entry.reasoningEffort)}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-          <label className={`access-toggle ${preferences.fullAccess ? "enabled" : ""}`} title="允许 Codex 不受沙箱限制地执行任务">
-            <ShieldAlert size={16} />
-            <span>完全访问</span>
-            <input
-              type="checkbox"
-              checked={preferences.fullAccess}
-              onChange={(event) => onPreferencesChange({ ...preferences, fullAccess: event.target.checked })}
-            />
-            <i aria-hidden="true" />
-          </label>
-        </div>
-      </header>
-
-      <div
-        className="conversation-scroll"
-        ref={scrollRef}
-        data-processes-open={processesOpen ? "true" : "false"}
-        onScroll={(event) => {
-          const scroller = event.currentTarget;
-          atBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
-        }}
-      >
-        {loading ? (
-          <div className="history-loading"><LoaderCircle className="spin" size={20} />加载历史记录</div>
-        ) : (
-          <div className="history-stream">
-            {loadingOlder && <div className="history-progress" role="status"><LoaderCircle className="spin" size={15} />正在加载较早记录</div>}
-            {thread.turns.map((turn) => <TurnView key={turn.id} turn={turn} processesOpen={processesOpen} />)}
-            {thread.turns.length === 0 && <div className="new-thread-state"><Bot size={25} /><h2>新会话</h2><p>在下方输入第一项需求。</p></div>}
-          </div>
-        )}
-      </div>
-
-      {pendingRequests.length > 0 && (
-        <ApprovalBar api={api} requests={pendingRequests} onError={onError} onRequestsChange={onRequestsChange} />
-      )}
-
-      <footer className="composer-shell">
-        <div className="composer">
-          <textarea
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void send();
-              }
-            }}
-            placeholder={active ? "任务进行中" : "发送新的需求"}
-            disabled={active}
-            rows={2}
-          />
-          <button className="send-button" onClick={() => void send()} disabled={active || sending || !text.trim()} title="发送">
-            {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
-          </button>
-        </div>
-      </footer>
-    </div>
-  );
-}
-
-function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean }) {
-  return (
-    <section className="turn-block" data-status={turn.status}>
-      {turn.items.map((item, index) => (
-        processesOpen || !isProcessItem(item)
-          ? <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} />
-          : null
-      ))}
-      {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
-      {turn.error !== null && turn.error !== undefined && <div className="turn-error"><CircleAlert size={16} />{stringify(turn.error)}</div>}
-    </section>
-  );
-}
-
-function ItemView({ item }: { item: ThreadItem }) {
-  if (item.type === "userMessage") {
-    const content = Array.isArray(item.content) ? item.content : [];
-    const text = content.map((entry) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : "")).filter(Boolean).join("\n");
-    return <article className="message user-message"><div className="message-label"><User size={14} />你</div><div className="message-body">{text}</div></article>;
-  }
-  if (item.type === "agentMessage") {
-    const phase = typeof item.phase === "string" ? item.phase : "final_answer";
-    const content = String(item.text ?? "");
-    if (phase === "commentary") {
-      return (
-        <details className="message commentary-message">
-          <summary className="message-label"><Bot size={15} />过程消息</summary>
-          <div className="message-body markdown-body"><MarkdownContent content={content} /></div>
-        </details>
-      );
-    }
-    return <article className="message agent-message"><div className="message-label"><Bot size={15} />Codex</div><div className="message-body markdown-body"><MarkdownContent content={content} /></div></article>;
-  }
-  if (item.type === "reasoning") {
-    const summary = Array.isArray(item.summary) ? item.summary.join("\n") : "";
-    const content = Array.isArray(item.content) ? item.content.join("\n") : "";
-    return <details className="reasoning-item"><summary><CircleDot size={15} />思考过程</summary><pre>{summary || content || "正在思考..."}</pre></details>;
-  }
-  if (item.type === "plan") {
-    return (
-      <details className="tool-item compact-tool">
-        <summary><CircleCheck size={15} />计划<span className={`tool-status ${String(item.status ?? "")}`}>{toolStatus(item.status)}</span></summary>
-        <pre>{String(item.text ?? "")}</pre>
-      </details>
-    );
-  }
-  if (item.type === "commandExecution") {
-    return (
-      <details className="tool-item command-item compact-tool">
-        <summary><TerminalSquare size={15} />命令<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
-        <code>{String(item.command ?? "")}</code>
-        {item.aggregatedOutput ? <pre>{String(item.aggregatedOutput)}</pre> : null}
-      </details>
-    );
-  }
-  if (item.type === "fileChange") {
-    const changes = Array.isArray(item.changes) ? item.changes : [];
-    return (
-      <details className="tool-item file-item compact-tool">
-        <summary><FileCode2 size={15} />文件修改<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
-        <ul>{changes.map((change, index) => <li key={index}>{changePath(change)}</li>)}</ul>
-      </details>
-    );
-  }
-  if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch"].includes(item.type)) {
-    return (
-      <details className="tool-item compact-tool">
-        <summary><Wrench size={15} />{toolName(item)}<span className={`tool-status ${String(item.status ?? "")}`}>{toolStatus(item.status)}</span></summary>
-        <pre>{stringify(item)}</pre>
-      </details>
-    );
-  }
-  if (item.type === "contextCompaction") {
-    return <div className="system-note"><Check size={14} />上下文已整理</div>;
-  }
-  return null;
-}
-
-function ApprovalBar({ api, requests, onError, onRequestsChange }: { api: ApiClient; requests: PendingRequest[]; onError: (value: string) => void; onRequestsChange: (value: PendingRequest[]) => void }) {
-  const request = requests[0]!;
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const command = typeof request.params.command === "string" ? request.params.command : null;
-  const reason = typeof request.params.reason === "string" ? request.params.reason : null;
-  const questions = Array.isArray(request.params.questions)
-    ? request.params.questions.filter(isRecord)
-    : [];
-  const isQuestion = request.method === "item/tool/requestUserInput";
-  const respond = async (decision: "accept" | "decline") => {
-    try {
-      const body = isQuestion
-        ? {
-            answers: Object.fromEntries(
-              questions.map((question) => [String(question.id), { answers: [answers[String(question.id)] ?? ""] }]),
-            ),
-          }
-        : { decision };
-      const result = (await api.respondToRequest(request.key, body)) as { pendingRequests?: PendingRequest[] };
-      onRequestsChange(result.pendingRequests ?? requests.filter((entry) => entry.key !== request.key));
-    } catch (error) {
-      onError(errorMessage(error));
-    }
-  };
-  return (
-    <section className={`approval-bar ${isQuestion ? "question-bar" : ""}`}>
-      <ShieldAlert size={18} />
-      <div className="approval-content">
-        <strong>{approvalTitle(request.method)}</strong>
-        {isQuestion ? (
-          <div className="question-fields">
-            {questions.map((question) => {
-              const id = String(question.id);
-              const options = Array.isArray(question.options) ? question.options.filter(isRecord) : [];
-              return (
-                <label key={id}>
-                  <span>{String(question.question ?? question.header ?? "请输入回答")}</span>
-                  {options.length ? (
-                    <select value={answers[id] ?? ""} onChange={(event) => setAnswers((current) => ({ ...current, [id]: event.target.value }))}>
-                      <option value="">请选择</option>
-                      {options.map((option) => <option key={String(option.label)} value={String(option.label)}>{String(option.label)}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      type={question.isSecret ? "password" : "text"}
-                      value={answers[id] ?? ""}
-                      onChange={(event) => setAnswers((current) => ({ ...current, [id]: event.target.value }))}
-                    />
-                  )}
-                </label>
-              );
-            })}
-          </div>
-        ) : <p>{reason || command || "Codex 需要确认后继续"}</p>}
-      </div>
-      {requests.length > 1 && <span className="count-badge">{requests.length}</span>}
-      {!isQuestion && <button className="secondary-button" onClick={() => void respond("decline")}>拒绝</button>}
-      <button
-        className="primary-button compact"
-        onClick={() => void respond("accept")}
-        disabled={isQuestion && questions.some((question) => !answers[String(question.id)]?.trim())}
-      ><Check size={16} />{isQuestion ? "提交" : "允许"}</button>
-    </section>
-  );
-}
-
-function WorkspaceDialog({ onClose, onAdd }: { onClose: () => void; onAdd: (workspacePath: string) => Promise<void> }) {
-  const [workspacePath, setWorkspacePath] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-
-  const add = async (event: FormEvent) => {
-    event.preventDefault();
-    setSubmitting(true);
-    setError("");
-    try {
-      await onAdd(workspacePath.trim());
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title">
-      <header><div><FolderPlus size={18} /><h2 id="workspace-dialog-title">新增工作区</h2></div><IconButton title="关闭" onClick={onClose}><X size={18} /></IconButton></header>
-      <form onSubmit={add}>
-        <div className="dialog-body">
-          <label><span>工作区路径</span><input value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/home/user/code/project" autoFocus /></label>
-          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-        </div>
-        <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={submitting || !workspacePath.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <FolderPlus size={17} />}添加</button></footer>
-      </form>
-    </section>
-  );
-}
-
-function NewThreadDialog({ workspaces, initialWorkspace, models, onClose, onCreate }: {
-  workspaces: Workspace[];
-  initialWorkspace: string;
-  models: Model[];
-  onClose: () => void;
-  onCreate: (cwd: string, value: Preferences) => Promise<void>;
-}) {
-  const defaultModel = models.find((model) => model.isDefault) ?? models[0];
-  const [cwd, setCwd] = useState(initialWorkspace || workspaces[0]?.path || "");
-  const [model, setModel] = useState(defaultModel?.model ?? "");
-  const [effort, setEffort] = useState(defaultModel?.defaultReasoningEffort ?? "medium");
-  const [fullAccess, setFullAccess] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const selectedModel = modelFor(models, model);
-
-  const create = async () => {
-    setSubmitting(true);
-    setError("");
-    try {
-      await onCreate(cwd, { model, effort, fullAccess });
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-thread-title">
-      <header><div><Plus size={18} /><h2 id="new-thread-title">新建会话</h2></div><IconButton title="关闭" onClick={onClose}><X size={18} /></IconButton></header>
-      <div className="dialog-body">
-        <label><span>工作区</span><select value={cwd} onChange={(event) => setCwd(event.target.value)}>{workspaces.map((workspace) => <option key={workspace.path} value={workspace.path}>{workspace.name} - {workspace.path}</option>)}</select></label>
-        <div className="dialog-grid">
-        <label><span>模型</span><select value={model} onChange={(event) => { const next = modelFor(models, event.target.value); setModel(event.target.value); setEffort(next?.defaultReasoningEffort ?? "medium"); }}>{models.map((entry) => <option key={entry.id} value={entry.model} title={entry.description}>{entry.displayName}</option>)}</select></label>
-          <label><span>思考强度</span><select value={effort} onChange={(event) => setEffort(event.target.value)}>{selectedModel?.supportedReasoningEfforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort} title={entry.description}>{effortLabel(entry.reasoningEffort)}</option>)}</select></label>
-        </div>
-        <label className="dialog-toggle"><div><ShieldAlert size={17} /><span><strong>完全访问权限</strong><small>关闭沙箱与命令审批</small></span></div><input type="checkbox" checked={fullAccess} onChange={(event) => setFullAccess(event.target.checked)} /><i /></label>
-        {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      </div>
-      <footer><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => void create()} disabled={submitting || !cwd || !model}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}创建</button></footer>
-    </section>
-  );
-}
-
-function IconButton({ title, onClick, children }: { title: string; onClick: () => void; children: ReactNode }) {
-  return <button className="icon-button" title={title} aria-label={title} onClick={onClick}>{children}</button>;
 }
 
 function mutateThreadFromEvent(thread: Thread, message: { method?: string; params?: Record<string, unknown> }): Thread {
@@ -1150,95 +701,4 @@ function mutateThreadFromEvent(thread: Thread, message: { method?: string; param
     item.content = content;
   }
   return next;
-}
-
-const mergeHistoricalTurns = (older: Turn[], current: Turn[]): Turn[] => {
-  const currentIds = new Set(current.map((turn) => turn.id));
-  return [...older.filter((turn) => !currentIds.has(turn.id)), ...current];
-};
-
-const userMessageText = (item: ThreadItem): string => {
-  if (item.type !== "userMessage" || !Array.isArray(item.content)) return "";
-  return item.content
-    .map((entry) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : ""))
-    .filter(Boolean)
-    .join("\n");
-};
-
-const userMessageItem = (text: string): ThreadItem => ({
-  id: `user-${Date.now()}`,
-  type: "userMessage",
-  content: [{ type: "text", text }],
-});
-
-const ensureUserMessage = (turn: Turn, text: string): Turn =>
-  turn.items.some((item) => userMessageText(item) === text)
-    ? turn
-    : { ...turn, items: [userMessageItem(text), ...turn.items] };
-
-const mergeTurn = (existing: Turn, incoming: Turn): Turn => {
-  const incomingIds = new Set(incoming.items.map((item) => item.id).filter(Boolean));
-  const incomingUserTexts = new Set(incoming.items.map(userMessageText).filter(Boolean));
-  const existingOnly = existing.items.filter((item) => {
-    const text = userMessageText(item);
-    return (!item.id || !incomingIds.has(item.id)) && (!text || !incomingUserTexts.has(text));
-  });
-  const mergedItems = [...incoming.items, ...existingOnly];
-  return {
-    ...existing,
-    ...incoming,
-    items: [
-      ...mergedItems.filter((item) => userMessageText(item) !== ""),
-      ...mergedItems.filter((item) => userMessageText(item) === ""),
-    ],
-  };
-};
-
-const isProcessItem = (item: ThreadItem): boolean =>
-  item.type === "reasoning" ||
-  item.type === "plan" ||
-  item.type === "commandExecution" ||
-  item.type === "fileChange" ||
-  ["mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch"].includes(item.type) ||
-  (item.type === "agentMessage" && item.phase === "commentary");
-
-const modelFor = (models: Model[], value: string | null) => models.find((model) => model.model === value || model.id === value) ?? models.find((model) => model.isDefault) ?? models[0];
-const normalizePreferences = (value: Preferences, models: Model[]): Preferences => {
-  const model = modelFor(models, value.model);
-  const effort = model?.supportedReasoningEfforts.some((entry) => entry.reasoningEffort === value.effort)
-    ? value.effort
-    : model?.defaultReasoningEffort ?? null;
-  return { model: model?.model ?? null, effort, fullAccess: value.fullAccess };
-};
-
-const threadTitle = (thread: Thread): string => thread.name?.trim() || thread.preview?.trim().split("\n")[0]?.slice(0, 68) || "未命名会话";
-const sourceLabel = (source: unknown): string => {
-  const raw = typeof source === "string" ? source : isRecord(source) ? Object.keys(source)[0] ?? "Codex" : "Codex";
-  const labels: Record<string, string> = { cli: "CLI", vscode: "VS Code", exec: "Exec", appServer: "Web", subAgent: "子代理" };
-  return labels[raw] ?? raw;
-};
-const relativeTime = (timestamp: number): string => {
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "刚刚";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
-  return `${Math.floor(seconds / 86400)} 天`;
-};
-const effortLabel = (value: string): string => ({ none: "无", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大", ultra: "极高" })[value] ?? value;
-const toolStatus = (value: unknown): string => ({ inProgress: "进行中", completed: "完成", failed: "失败", declined: "已拒绝" })[String(value)] ?? "";
-const toolName = (item: ThreadItem): string => String(item.tool ?? (item.type === "webSearch" ? "网页搜索" : "工具调用"));
-const changePath = (change: unknown): string => {
-  if (!isRecord(change)) return stringify(change);
-  return String(change.path ?? change.filePath ?? Object.keys(change)[0] ?? "文件");
-};
-const approvalTitle = (method: string): string => method.includes("requestUserInput") ? "Codex 需要你的回答" : method.includes("fileChange") ? "确认文件修改" : method.includes("commandExecution") ? "确认执行命令" : "Codex 等待确认";
-const errorMessage = (value: unknown): string => value instanceof Error ? value.message : "操作失败";
-const stringify = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
-};
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
-
-function MarkdownContent({ content }: { content: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>;
 }

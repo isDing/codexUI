@@ -4,7 +4,7 @@ services:
       context: .
       args:
         CODEX_VERSION: "0.147.0"
-    image: codexui:1.0.4
+    image: codexui:latest
     container_name: codexui
     init: true
     restart: unless-stopped

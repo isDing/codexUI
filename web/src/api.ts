@@ -47,6 +47,13 @@ export class ApiClient {
     return this.request(`/api/threads/${encodeURIComponent(threadId)}/read`, { ...this.writeOptions(), signal: options.signal });
   }
 
+  cancelTurn(threadId: string, turnId?: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/threads/${encodeURIComponent(threadId)}/cancel`,
+      this.writeOptions(turnId ? { turnId } : {}),
+    );
+  }
+
   createThread(value: { cwd: string } & Preferences): Promise<{ thread: Thread; preferences: Preferences }> {
     return this.request("/api/threads", this.writeOptions(value));
   }

@@ -626,6 +626,28 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     commitDetail(threadId, { ...current, status: { type: "active" }, turns });
   };
 
+  const markTurnCancelled = (threadId: string) => {
+    const current = detailRef.current;
+    if (current && current.id === threadId) {
+      const now = Math.floor(Date.now() / 1000);
+      commitDetail(threadId, {
+        ...current,
+        status: { type: "idle" },
+        turns: current.turns.map((turn) =>
+          turn.status === "inProgress"
+            ? { ...turn, status: "interrupted", completedAt: turn.completedAt ?? now }
+            : turn,
+        ),
+      });
+    }
+    setSnapshot((snap) => ({
+      ...snap,
+      threads: snap.threads.map((thread) =>
+        thread.id === threadId ? { ...thread, status: { type: "idle" } } : thread,
+      ),
+    }));
+  };
+
   const logout = async () => {
     try {
       await api.logout();
@@ -734,6 +756,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             hasOlder={historyCursor !== null}
             onLoadOlder={fetchOlderHistory}
             onTurnStarted={appendStartedTurn}
+            onTurnCancelled={markTurnCancelled}
             onPreferencesChange={setPreferences}
             onError={setError}
             onRequestsChange={(pendingRequests) => updateSnapshot({ pendingRequests })}

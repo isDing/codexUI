@@ -333,6 +333,9 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .composer textarea { width: 100%; min-height: 36px; max-height: 150px; padding: 4px 0; resize: none; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 13px; line-height: 1.55; }
 .composer textarea::placeholder { color: #9aa19d; }
 .send-button { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; color: #fff; background: var(--dark); border: 0; border-radius: 5px; cursor: pointer; }
+.send-button:disabled { opacity: 0.55; cursor: default; }
+.cancel-button { background: #8d312c; }
+.cancel-button:hover:not(:disabled) { background: #a63c35; }
 
 .approval-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; min-height: 57px; padding: 8px 18px; color: #6f420d; background: var(--amber-soft); border-top: 1px solid #eacb96; }
 .approval-bar > div { min-width: 0; }

@@ -46,6 +46,7 @@ const approvalSchema = z.object({
 });
 
 const idParam = z.string().min(1).max(200);
+const cancelSchema = z.object({ turnId: z.string().min(1).max(200).optional() });
 
 const jsonError = (response: Response, status: number, error: unknown): void => {
   const message = error instanceof Error ? error.message : "请求失败";
@@ -268,6 +269,22 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     touch(request, db);
     service.markRead(threadId.data);
     response.json({ unreadThreadIds: db.unreadThreadIds() });
+  });
+
+  app.post("/api/threads/:threadId/cancel", auth, requireCsrf, async (request: Request, response: Response) => {
+    const threadId = idParam.safeParse(request.params.threadId);
+    const body = cancelSchema.safeParse(request.body ?? {});
+    if (!threadId.success || !body.success) {
+      response.status(400).json({ error: "请求参数无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      await service.cancelTurn(threadId.data, body.data.turnId);
+      response.json({ ok: true });
+    } catch (error) {
+      jsonError(response, 400, error);
+    }
   });
 
   app.post("/api/requests/:key/respond", auth, requireCsrf, (request: Request, response: Response) => {

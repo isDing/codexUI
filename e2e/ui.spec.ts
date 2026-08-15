@@ -175,6 +175,55 @@ test("switching between threads stays instant and never wedges on the loading sc
   await expect(page.locator(CONTENT).first()).toBeVisible({ timeout: 15_000 });
 });
 
+test("a running request can be cancelled and the composer re-enables", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  await page.route("**/api/threads/*/turns", async (route) => {
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        turn: {
+          id: "e2e-cancel-turn",
+          items: [{ id: "e2e-cancel-final", type: "agentMessage", phase: "final_answer", text: "E2E 取消测试回答" }],
+          status: "inProgress",
+          error: null,
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: null,
+          durationMs: null,
+        },
+      }),
+    });
+  });
+  await page.route("**/api/threads/*/cancel", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+
+  const composerArea = page.locator(".composer textarea");
+  const cancelEcho = "E2E 取消测试";
+  await composerArea.fill(cancelEcho);
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".user-message .message-body").filter({ hasText: cancelEcho })).toBeVisible();
+
+  // 发送后：输入框禁用，出现取消按钮
+  await expect(composerArea).toBeDisabled();
+  await expect(composerArea).toHaveAttribute("placeholder", "任务进行中");
+  const cancelButton = page.getByRole("button", { name: "取消任务" });
+  await expect(cancelButton).toBeVisible();
+
+  // 取消后：输入框恢复可用，发送按钮回归，任务显示中断标记
+  await cancelButton.click();
+  await expect(composerArea).toBeEnabled();
+  await expect(page.getByTitle("发送")).toBeVisible();
+  await expect(page.locator(".interrupted-note").first()).toBeVisible();
+  await page.unroute("**/api/threads/*/turns");
+  await page.unroute("**/api/threads/*/cancel");
+});
+
 test("conversation view stays position-stable while older history loads", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 920 });
   await login(page);

@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Send,
   ShieldAlert,
+  Square,
   TerminalSquare,
   User,
   Wrench,
@@ -49,6 +50,7 @@ export function Conversation({
   hasOlder,
   onLoadOlder,
   onTurnStarted,
+  onTurnCancelled,
   onPreferencesChange,
   onError,
   onRequestsChange,
@@ -64,12 +66,14 @@ export function Conversation({
   hasOlder: boolean;
   onLoadOlder: () => void;
   onTurnStarted: (threadId: string, turn: Turn) => void;
+  onTurnCancelled: (threadId: string) => void;
   onPreferencesChange: (value: Preferences) => void;
   onError: (value: string) => void;
   onRequestsChange: (value: PendingRequest[]) => void;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const atBottomRef = useRef(true);
@@ -166,6 +170,22 @@ export function Conversation({
       onError(errorMessage(reason));
     } finally {
       setSending(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (cancelling) return;
+    setCancelling(true);
+    onError("");
+    try {
+      const running = thread.turns.find((turn) => turn.status === "inProgress");
+      await api.cancelTurn(thread.id, running?.id);
+      // 本地即时反映取消结果；codex 的完成通知随后到达时会被幂等覆盖
+      onTurnCancelled(thread.id);
+    } catch (reason) {
+      onError(errorMessage(reason));
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -274,9 +294,21 @@ export function Conversation({
             disabled={active}
             rows={1}
           />
-          <button className="send-button" onClick={() => void send()} disabled={active || sending || !text.trim()} title="发送">
-            {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
-          </button>
+          {active ? (
+            <button
+              className="send-button cancel-button"
+              onClick={() => void cancel()}
+              disabled={cancelling}
+              title="取消任务"
+              aria-label="取消任务"
+            >
+              {cancelling ? <LoaderCircle className="spin" size={18} /> : <Square size={16} />}
+            </button>
+          ) : (
+            <button className="send-button" onClick={() => void send()} disabled={sending || !text.trim()} title="发送">
+              {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
+            </button>
+          )}
         </div>
       </footer>
     </div>

@@ -132,6 +132,7 @@ export class CodexService extends EventEmitter {
   private readonly pendingSince = new Map<string, number>();
   private readonly readCache = new Map<string, { at: number; updatedAt: number; value: ReadThreadResult }>();
   private readonly prefScanCache = new Map<string, { at: number; threadUpdatedAt: number; prefs: ThreadPreferences | null }>();
+  private readonly startedTurnIds = new Map<string, string>();
   private models: CodexModel[] = [];
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
@@ -329,6 +330,31 @@ export class CodexService extends EventEmitter {
     });
     this.pendingThreads.delete(threadId);
     this.pendingSince.delete(threadId);
+    const started = rpcResult<{ turn?: { id?: string } }>(result);
+    if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
+    return result;
+  }
+
+  async cancelTurn(threadId: string, turnId?: string) {
+    const known = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
+    if (!known) throw new Error("会话不存在");
+    const target = turnId ?? this.startedTurnIds.get(threadId);
+    if (!target) throw new Error("未找到正在执行的任务");
+    const result = await this.rpc.request("turn/interrupt", { threadId, turnId: target });
+    // 清理该会话遗留的待处理审批请求
+    let approvalsChanged = false;
+    for (const [key, request] of this.approvals) {
+      if (typeof request.params.threadId === "string" && request.params.threadId === threadId) {
+        this.approvals.delete(key);
+        approvalsChanged = true;
+      }
+    }
+    if (approvalsChanged) this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
+    this.startedTurnIds.delete(threadId);
+    // 乐观更新本地状态并广播：codex 的完成通知随后到达时会被幂等覆盖
+    const thread = this.threads.get(threadId);
+    if (thread) thread.status = { type: "idle" };
+    this.broadcast("threads.changed", { threads: this.sortedThreads() });
     return result;
   }
 
@@ -458,11 +484,15 @@ export class CodexService extends EventEmitter {
     if (message.method === "turn/completed" && threadId) {
       const thread = this.threads.get(threadId);
       if (thread) thread.status = { type: "idle" };
+      this.startedTurnIds.delete(threadId);
       this.recordCompletion(threadId);
     }
     if (message.method === "turn/started" && threadId) {
       const thread = this.threads.get(threadId);
       if (thread) thread.status = { type: "active" };
+      if (isRecord(params.turn) && typeof params.turn.id === "string") {
+        this.startedTurnIds.set(threadId, params.turn.id);
+      }
       this.pendingThreads.delete(threadId);
       this.pendingSince.delete(threadId);
     }

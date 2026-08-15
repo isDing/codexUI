@@ -260,7 +260,9 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .access-toggle input:checked + i, .dialog-toggle input:checked + i { background: #c47215; }
 .access-toggle input:checked + i::after, .dialog-toggle input:checked + i::after { transform: translateX(11px); }
 
-.conversation-scroll { min-height: 0; overflow: auto; scroll-behavior: smooth; background: #fbfcfb; }
+/* 程序化滚动定位（进入会话定位到最新、补历史时保持位置）必须瞬时生效：
+   设置 scroll-behavior:smooth 会让这些调整变成可见的滑动动画 */
+.conversation-scroll { min-height: 0; overflow: auto; background: #fbfcfb; }
 .conversation-scroll[data-processes-open="false"] .reasoning-item,
 .conversation-scroll[data-processes-open="false"] .commentary-message,
 .conversation-scroll[data-processes-open="false"] .tool-item { display: none; }

@@ -165,6 +165,32 @@ test("switching between threads stays instant and never wedges on the loading sc
   await expect(page.locator(CONTENT).first()).toBeVisible({ timeout: 15_000 });
 });
 
+test("conversation view stays position-stable while older history loads", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  // 自动补载较早历史期间，最新一轮消息的视口位置不应出现可见滑动
+  const start = Date.now();
+  let minTop = Infinity;
+  let maxTop = -Infinity;
+  while (Date.now() - start < 2500) {
+    const top = await page
+      .locator(".turn-block")
+      .last()
+      .evaluate((el) => el.getBoundingClientRect().top)
+      .catch(() => Infinity);
+    if (top !== Infinity) {
+      minTop = Math.min(minTop, top);
+      maxTop = Math.max(maxTop, top);
+    }
+    await page.waitForTimeout(150);
+  }
+  expect(maxTop - minTop).toBeLessThanOrEqual(3);
+});
+
 test("refresh while WebSocket is still connecting never crashes", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);

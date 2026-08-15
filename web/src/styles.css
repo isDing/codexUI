@@ -389,6 +389,9 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 }
 
 @media (max-width: 820px) {
+  /* iOS Safari 会在聚焦字号 <16px 的输入框时自动放大页面：
+     移动端所有表单控件统一 16px，从根源上禁用自动缩放（收起键盘后也不会残留缩放） */
+  input, textarea, select { font-size: 16px !important; }
   .app-shell { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px minmax(0, 1fr); }
   .topbar { grid-column: 1; }
   .topbar-brand { flex: 1; }

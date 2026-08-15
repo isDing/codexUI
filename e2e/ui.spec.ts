@@ -244,4 +244,7 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   if (dimensions.scroller) {
     expect(dimensions.scroller.scrollWidth).toBeLessThanOrEqual(dimensions.scroller.clientWidth + 1);
   }
+  // iOS 自动缩放防护：移动端输入控件字号必须 ≥16px，否则聚焦时页面会被系统放大
+  const inputFont = await page.locator(".composer textarea").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(inputFont).toBeGreaterThanOrEqual(16);
 });

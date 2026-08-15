@@ -238,6 +238,18 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
 
   useActivityRefresh(api, auth, onAuthChange);
 
+  // 安全发送 viewing 消息：连接未就绪时跳过——open 事件会用 selectedRef 补发当前选择，
+  // 对 CONNECTING/CLOSED 状态直接 send 会抛 InvalidStateError 并触发错误边界
+  const sendViewing = useCallback((threadId: string) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      socket.send(JSON.stringify({ type: "viewing", threadId }));
+    } catch {
+      // 发送失败可忽略：重连后的 open 事件会重新同步选择
+    }
+  }, []);
+
   const updateSnapshot = useCallback((incoming: Partial<Snapshot>) => {
     setSnapshot((current) => ({ ...current, ...incoming }));
   }, []);
@@ -319,7 +331,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       socketRef.current = socket;
       socket.addEventListener("open", () => {
         retryDelay = 1_000;
-        if (selectedRef.current) socket?.send(JSON.stringify({ type: "viewing", threadId: selectedRef.current }));
+        if (selectedRef.current) sendViewing(selectedRef.current);
       });
       socket.addEventListener("message", (event) => {
         const message = JSON.parse(event.data) as { type: string; payload?: unknown };
@@ -368,7 +380,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       socket?.close();
       socketRef.current = null;
     };
-  }, [applyCodexEvent, onAuthChange, updateSnapshot]);
+  }, [applyCodexEvent, onAuthChange, sendViewing, updateSnapshot]);
 
   const maybeMarkRead = useCallback((threadId: string) => {
     if (!snapshot.unreadThreadIds.includes(threadId)) return;
@@ -404,7 +416,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     setSelectedWorkspace(thread.cwd);
     setDrawer(null);
     setError("");
-    socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: thread.id }));
+    sendViewing(thread.id);
 
     const cached = threadCacheRef.current.get(thread.id);
     const stale = cached !== undefined && cached.thread.updatedAt !== thread.updatedAt;
@@ -502,7 +514,12 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     const thread = snapshot.threads.find((entry) => entry.id === threadId);
     if (!thread) return;
     restoreThreadRef.current = null;
-    void selectThread(thread);
+    try {
+      selectThread(thread);
+    } catch (error) {
+      // 恢复流程不应让整页进入错误边界；失败时保持列表视图即可
+      console.error("Failed to restore thread:", error);
+    }
   }, [detail, detailLoading, selectedThreadId, snapshot.threads]);
 
   const fetchOlderHistory = useCallback(() => {
@@ -587,7 +604,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     setDetailLoading(false);
     setPreferences(result.preferences);
     setNewThreadOpen(false);
-    socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: result.thread.id }));
+    sendViewing(result.thread.id);
   };
 
   const addWorkspace = async (workspacePath: string) => {

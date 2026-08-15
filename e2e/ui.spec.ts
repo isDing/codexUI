@@ -165,6 +165,29 @@ test("switching between threads stays instant and never wedges on the loading sc
   await expect(page.locator(CONTENT).first()).toBeVisible({ timeout: 15_000 });
 });
 
+test("refresh while WebSocket is still connecting never crashes", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const { threadId } = await page.evaluate(async () => {
+    const res = await fetch("/api/bootstrap");
+    const data = await res.json();
+    return { threadId: data.threads[0]?.id ?? "" };
+  });
+  test.skip(!threadId, "需要至少一个会话");
+
+  // 预置“上次选中会话”并延迟 WebSocket 握手，复现刷新时 WS 仍在 CONNECTING 的场景
+  await page.addInitScript((tid) => {
+    window.localStorage.setItem("codex-ui.selected-thread", tid);
+  }, threadId);
+  await page.routeWebSocket("**/ws", (ws) => {
+    setTimeout(() => ws.connectToServer(), 2000);
+  });
+
+  await page.reload();
+  await expect(page.locator(".crash-screen")).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.locator(CONTENT).first()).toBeVisible({ timeout: 15_000 });
+});
+
 test("mobile drawers and conversation remain usable", async ({ page }) => {  await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
 

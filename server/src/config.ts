@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const required = (name: string, fallback?: string): string => {
@@ -31,7 +32,7 @@ export const loadConfig = () => ({
   dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
   codexBin: process.env.CODEX_BIN ?? "codex",
   codexHome: process.env.CODEX_HOME,
-  workspaceRoots: splitPaths(process.env.WORKSPACE_ROOTS ?? "/home/user/code"),
+  workspaceRoots: splitPaths(process.env.WORKSPACE_ROOTS ?? path.join(os.homedir(), "code")),
   allowedOrigin: process.env.ALLOWED_ORIGIN ?? "http://localhost:5173",
   adminUser: process.env.ADMIN_USER ?? "admin",
   adminPasswordHash: required("ADMIN_PASSWORD_HASH"),

@@ -14,21 +14,21 @@ services:
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0
-      HOME: /home/user
-      CODEX_HOME: /home/user/.codex
+      HOME: ${HOME_DIR:-/home/user}
+      CODEX_HOME: ${HOME_DIR:-/home/user}/.codex
       DATA_DIR: /app/data
       WEB_DIST: /app/web/dist
-      WORKSPACE_ROOTS: /home/user/code:/home/user/server
-      ALLOWED_ORIGIN: https://example.com
-      SECURE_COOKIES: "true"
-      TRUST_PROXY: "true"
+      WORKSPACE_ROOTS: ${CODE_DIR:-/home/user/code}:${SERVER_DIR:-/home/user/server}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-http://localhost:5173}
+      SECURE_COOKIES: ${SECURE_COOKIES:-"false"}
+      TRUST_PROXY: ${TRUST_PROXY:-"false"}
     ports:
-      - "127.0.0.1:3090:3000"
+      - "127.0.0.1:${PORT_MAP:-3090}:3000"
     volumes:
       - codexui-data:/app/data
-      - /home/user/.codex:/home/user/.codex
-      - /home/user/code:/home/user/code
-      - /home/user/server:/home/user/server
+      - ${HOME_DIR:-/home/user}/.codex:${HOME_DIR:-/home/user}/.codex
+      - ${CODE_DIR:-/home/user/code}:${CODE_DIR:-/home/user/code}
+      - ${SERVER_DIR:-/home/user/server}:${SERVER_DIR:-/home/user/server}
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=1g
     stop_grace_period: 20s

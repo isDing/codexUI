@@ -5,11 +5,11 @@ Codex UI is a self-hosted web client for the Codex App Server installed on this 
 ## Runtime layout
 
 - Web/API: Node.js + Express + React, exposed by Docker on `127.0.0.1:3090`.
-- Codex: one `codex app-server` child process using `/home/user/.codex`.
+- Codex: one `codex app-server` child process using `CODEX_HOME`.
 - State: a Docker volume containing login sessions, thread preferences, and unread completion notices.
-- Public ingress: the host Nginx instance at `https://example.com`.
+- Public ingress: a host Nginx instance (see `deploy/nginx-*.conf` for example configs).
 
-The compose file mounts `/home/user/code` and `/home/user/server` at their original absolute paths. This is required because Codex stores each thread's original working directory.
+The compose file mounts the workspace directories at their original absolute paths. This is required because Codex stores each thread's original working directory.
 
 ## Configure
 
@@ -22,6 +22,15 @@ openssl rand -base64 48
 
 Put the first command's output in `ADMIN_PASSWORD_HASH` and the second command's output in `SESSION_SECRET`. Login sessions expire after four hours without pointer, keyboard, or touch activity.
 
+Machine-specific paths and the public origin are also read from `.env`, with generic defaults in `compose.yaml`:
+
+```bash
+HOME_DIR=/home/your-user            # Codex home base directory
+CODE_DIR=/home/your-user/code       # workspace root 1
+SERVER_DIR=/home/your-user/server   # workspace root 2
+ALLOWED_ORIGIN=https://your-domain.example
+```
+
 ## Run
 
 ```bash
@@ -33,7 +42,7 @@ curl http://127.0.0.1:3090/api/health
 Install `deploy/nginx-http.conf` first, request the certificate with Certbot's webroot mode, and then replace it with `deploy/nginx-https.conf`:
 
 ```bash
-certbot certonly --webroot -w /var/www/certbot -d example.com
+certbot certonly --webroot -w /var/www/certbot -d your-domain.example
 nginx -t
 systemctl reload nginx
 ```

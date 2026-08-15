@@ -27,7 +27,7 @@ export function WorkspaceDialog({ onClose, onAdd }: { onClose: () => void; onAdd
       <header><div><FolderPlus size={18} /><h2 id="workspace-dialog-title">新增工作区</h2></div><IconButton title="关闭" onClick={onClose}><X size={18} /></IconButton></header>
       <form onSubmit={add}>
         <div className="dialog-body">
-          <label><span>工作区路径</span><input value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/home/user/code/project" autoFocus /></label>
+          <label><span>工作区路径</span><input value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/path/to/project" autoFocus /></label>
           {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
         </div>
         <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={submitting || !workspacePath.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <FolderPlus size={17} />}添加</button></footer>

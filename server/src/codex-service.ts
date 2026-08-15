@@ -118,6 +118,7 @@ const MAX_PERSISTED_SETTINGS_SCAN_BYTES = 2 * 1024 * 1024;
 const READ_CACHE_TTL_MS = 10_000;
 const PREF_SCAN_CACHE_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 500;
+const RECYCLE_IDLE_MS = 5_000;
 
 type ReadThreadResult = {
   thread: CodexThread;
@@ -133,6 +134,9 @@ export class CodexService extends EventEmitter {
   private readonly readCache = new Map<string, { at: number; updatedAt: number; value: ReadThreadResult }>();
   private readonly prefScanCache = new Map<string, { at: number; threadUpdatedAt: number; prefs: ThreadPreferences | null }>();
   private readonly startedTurnIds = new Map<string, string>();
+  private lastActivityAt = Date.now();
+  private recycling = false;
+  private recycleArmed = true;
   private models: CodexModel[] = [];
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
@@ -158,7 +162,10 @@ export class CodexService extends EventEmitter {
     this.rpc.on("serverRequest", (message: RpcMessage) => this.onServerRequest(message));
     this.rpc.on("status", (status: { connected: boolean; message: string }) => {
       this.connected = status.connected;
-      this.broadcast("connection", status);
+      // 主动回收期间的短暂断开不对外广播，避免状态指示器闪烁
+      if (!(this.recycling && !status.connected)) {
+        this.broadcast("connection", status);
+      }
       // 断线重连后模型列表可能仍为空，主动补拉一次
       if (status.connected) void this.refreshModels().catch((error) => console.warn("Failed to refresh models:", error));
     });
@@ -171,7 +178,11 @@ export class CodexService extends EventEmitter {
 
   async start(): Promise<void> {
     // 轮询先于连接启动：即使首次连接失败，连接恢复后轮询也能自动接管
-    this.pollTimer = setInterval(() => void this.refreshThreads(true), this.config.pollIntervalMs);
+    this.pollTimer = setInterval(() => {
+      // 先检查回收（refreshThreads 入口会置 polling=true，必须在它之前调用）
+      this.maybeRecycle();
+      void this.refreshThreads(true);
+    }, this.config.pollIntervalMs);
     await this.rpc.start();
     await Promise.all([this.refreshThreads(false), this.refreshModels()]);
   }
@@ -267,6 +278,8 @@ export class CodexService extends EventEmitter {
     this.pendingThreads.set(value.thread.id, value.thread);
     this.pendingSince.set(value.thread.id, Date.now());
     this.broadcast("threads.changed", { thread: value.thread });
+    this.lastActivityAt = Date.now();
+    this.recycleArmed = true;
     return { thread: value.thread, preferences };
   }
 
@@ -332,6 +345,55 @@ export class CodexService extends EventEmitter {
     this.pendingSince.delete(threadId);
     const started = rpcResult<{ turn?: { id?: string } }>(result);
     if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
+    this.lastActivityAt = Date.now();
+    this.recycleArmed = true;
+    return result;
+  }
+
+  async retryTurn(
+    threadId: string,
+    input: { text: string; model: string | null; effort: string | null; fullAccess: boolean },
+  ) {
+    const known = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
+    if (!known) throw new Error("会话不存在");
+    const stored = this.db.getPreferences(threadId);
+    const model = input.model ?? stored.model;
+    const effort = input.effort ?? stored.effort;
+    // rollback 只作用于本进程已加载的会话：先 resume 载入（失败则说明
+    // 会话被其他进程占用，直接向用户报错）
+    await this.rpc.request("thread/resume", {
+      threadId,
+      model: model ?? undefined,
+      approvalPolicy: input.fullAccess ? "never" : "on-request",
+      sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+    });
+    // 撤销最后一轮（原需求与模型回复一并清除）
+    await this.rpc.request("thread/rollback", { threadId, numTurns: 1 });
+    this.readCache.delete(threadId);
+    this.prefScanCache.delete(threadId);
+    const preferences: ThreadPreferences = { model, effort, fullAccess: input.fullAccess };
+    this.db.setPreferences(threadId, preferences);
+    this.db.markRead(threadId);
+    const result = await this.rpc.request("turn/start", {
+      threadId,
+      input: [{ type: "text", text: input.text }],
+      model: model ?? undefined,
+      effort: effort ?? undefined,
+      approvalPolicy: input.fullAccess ? "never" : "on-request",
+      sandboxPolicy: input.fullAccess
+        ? { type: "dangerFullAccess" }
+        : {
+            type: "workspaceWrite",
+            writableRoots: [known.cwd].filter(Boolean),
+            networkAccess: true,
+            excludeTmpdirEnvVar: false,
+            excludeSlashTmp: false,
+        },
+    });
+    const started = rpcResult<{ turn?: { id?: string } }>(result);
+    if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
+    this.lastActivityAt = Date.now();
+    this.recycleArmed = true;
     return result;
   }
 
@@ -454,6 +516,35 @@ export class CodexService extends EventEmitter {
     this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
   }
 
+  // codex 的会话写锁（thread-writer-locks/<id>.lock 文件锁）会一直持有到
+  // app-server 卸载该会话（30 分钟无订阅无活动）或进程退出。为让服务器上的
+  // codex CLI 能在网页任务结束后立即 resume，任务完成 5 秒后主动回收子进程
+  // 释放全部写锁，并立即拉起干净的新进程（状态指示器不闪烁）。
+  private maybeRecycle(): void {
+    if (!this.recycleArmed || this.recycling || !this.connected || this.polling) return;
+    const hasActiveTurn = [...this.threads.values()].some((thread) => thread.status.type === "active");
+    if (hasActiveTurn || this.approvals.size > 0) return;
+    if (Date.now() - this.lastActivityAt < RECYCLE_IDLE_MS) return;
+    this.recycling = true;
+    // 每次空闲期只回收一次；有新活动后重新武装
+    this.recycleArmed = false;
+    void (async () => {
+      try {
+        await this.rpc.stop();
+      } catch (error) {
+        console.warn("Codex recycle stop failed:", error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      try {
+        await this.rpc.start();
+      } catch (error) {
+        console.warn("Codex recycle restart failed:", error);
+      } finally {
+        this.recycling = false;
+      }
+    })();
+  }
+
   private async refreshModels(): Promise<void> {
     const data: CodexModel[] = [];
     let cursor: string | null = null;
@@ -549,6 +640,8 @@ export class CodexService extends EventEmitter {
       }
       this.pendingThreads.delete(threadId);
       this.pendingSince.delete(threadId);
+      this.lastActivityAt = Date.now();
+    this.recycleArmed = true;
     }
     if (message.method === "thread/settings/updated" && threadId && isRecord(params.threadSettings)) {
       const preferences = preferencesFromRuntimeSettings(params.threadSettings, this.db.getPreferences(threadId));

@@ -69,6 +69,10 @@ export class ApiClient {
     return this.request(`/api/threads/${encodeURIComponent(threadId)}/turns`, this.writeOptions(value));
   }
 
+  retryTurn(threadId: string, value: { text: string } & Preferences): Promise<{ turn?: Turn }> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}/retry`, this.writeOptions(value));
+  }
+
   respondToRequest(key: string, value: Record<string, unknown>): Promise<unknown> {
     return this.request(`/api/requests/${encodeURIComponent(key)}/respond`, this.writeOptions(value));
   }

@@ -37,8 +37,7 @@ const turnSchema = z.object({
   model: z.string().nullable().optional(),
   effort: z.string().nullable().optional(),
   fullAccess: z.boolean().default(false),
-});
-const approvalSchema = z.object({
+});const approvalSchema = z.object({
   decision: z.enum(["accept", "decline"]).optional(),
   answers: z.record(z.string(), z.unknown()).optional(),
   content: z.record(z.string(), z.unknown()).optional(),
@@ -273,6 +272,27 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     touch(request, db);
     service.markRead(threadId.data);
     response.json({ unreadThreadIds: db.unreadThreadIds() });
+  });
+
+  app.post("/api/threads/:threadId/retry", auth, requireCsrf, async (request: Request, response: Response) => {
+    const threadId = idParam.safeParse(request.params.threadId);
+    const parsed = turnSchema.safeParse(request.body);
+    if (!threadId.success || !parsed.success) {
+      response.status(400).json({ error: "需求内容或会话设置无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      response.status(202).json(
+        await service.retryTurn(threadId.data, {
+          ...parsed.data,
+          model: parsed.data.model ?? null,
+          effort: parsed.data.effort ?? null,
+        }),
+      );
+    } catch (error) {
+      jsonError(response, 400, error);
+    }
   });
 
   app.post("/api/threads/:threadId/cancel", auth, requireCsrf, async (request: Request, response: Response) => {

@@ -11,6 +11,7 @@ import {
   FileCode2,
   LoaderCircle,
   MessageSquare,
+  Pencil,
   Send,
   ShieldAlert,
   Slash,
@@ -53,6 +54,7 @@ export function Conversation({
   onLoadOlder,
   onTurnStarted,
   onTurnCancelled,
+  onTurnRetried,
   onNewThread,
   onPreferencesChange,
   onError,
@@ -70,6 +72,7 @@ export function Conversation({
   onLoadOlder: () => void;
   onTurnStarted: (threadId: string, turn: Turn) => void;
   onTurnCancelled: (threadId: string) => void;
+  onTurnRetried: (threadId: string, turn: Turn) => void;
   onNewThread: () => void;
   onPreferencesChange: (value: Preferences) => void;
   onError: (value: string) => void;
@@ -78,6 +81,7 @@ export function Conversation({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [slashHighlight, setSlashHighlight] = useState(0);
@@ -297,7 +301,51 @@ export function Conversation({
         return;
       }
     }
+    if (editing) {
+      void retry();
+      return;
+    }
     void send();
+  };
+
+  const retry = async () => {
+    const requestText = text.trim();
+    if (!requestText || active || sending) return;
+    setSending(true);
+    onError("");
+    try {
+      const result = await api.retryTurn(thread.id, { text: requestText, ...preferences });
+      const turn = result.turn
+        ? ensureUserMessage(result.turn, requestText)
+        : {
+            id: `local-${Date.now()}`,
+            items: [userMessageItem(requestText)],
+            status: "inProgress",
+            error: null,
+            startedAt: Math.floor(Date.now() / 1000),
+            completedAt: null,
+            durationMs: null,
+          };
+      onTurnRetried(thread.id, turn);
+      setText("");
+      setEditing(false);
+    } catch (reason) {
+      onError(errorMessage(reason));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const startEdit = (originalText: string) => {
+    setEditing(true);
+    setText(originalText);
+    setSlashMenuOpen(false);
+    composerRef.current?.focus();
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setText("");
   };
 
   const cancel = async () => {
@@ -387,7 +435,15 @@ export function Conversation({
                 <ChevronsUp size={14} />加载更早的记录
               </button>
             )}
-            {thread.turns.map((turn) => <TurnView key={turn.id} turn={turn} processesOpen={processesOpen} />)}
+            {thread.turns.map((turn, index) => (
+              <TurnView
+                key={turn.id}
+                turn={turn}
+                processesOpen={processesOpen}
+                editable={!active && index === thread.turns.length - 1 && turn.status !== "inProgress"}
+                onEdit={startEdit}
+              />
+            ))}
             {thread.turns.length === 0 && <div className="new-thread-state"><Bot size={25} /><h2>新会话</h2><p>在下方输入第一项需求。</p></div>}
           </div>
         )}
@@ -398,6 +454,13 @@ export function Conversation({
       )}
 
       <footer className="composer-shell">
+        {editing && (
+          <div className="edit-mode-bar">
+            <Pencil size={13} />
+            <span>正在修改上一条需求：发送后将清除原回复并重新执行</span>
+            <button type="button" onClick={cancelEdit} aria-label="取消修改">取消</button>
+          </div>
+        )}
         <div className="composer">
           <button
             type="button"
@@ -455,7 +518,15 @@ export function Conversation({
               }
               submit();
             }}
-            placeholder={active ? "任务进行中（可用 /steer 追加指令）" : isMobileLayout ? "输入需求，回车换行" : "发送新的需求"}
+            placeholder={
+              editing
+                ? "修改需求后发送，将重新执行"
+                : active
+                  ? "任务进行中（可用 /steer 追加指令）"
+                  : isMobileLayout
+                    ? "输入需求，回车换行"
+                    : "发送新的需求"
+            }
             rows={1}
           />
           {active ? (
@@ -469,7 +540,12 @@ export function Conversation({
               {cancelling ? <LoaderCircle className="spin" size={18} /> : <Square size={16} />}
             </button>
           ) : (
-            <button className="send-button" onClick={() => submit()} disabled={sending || !text.trim()} title="发送">
+            <button
+              className="send-button"
+              onClick={() => submit()}
+              disabled={sending || !text.trim()}
+              title={editing ? "重新发送" : "发送"}
+            >
               {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
             </button>
           )}
@@ -504,10 +580,19 @@ export function Conversation({
   );
 }
 
-function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean }) {
+function TurnView({ turn, processesOpen, editable, onEdit }: {
+  turn: Turn;
+  processesOpen: boolean;
+  editable: boolean;
+  onEdit: (text: string) => void;
+}) {
   const items = turn.items;
   // 整轮都是过程内容时，折叠会导致一片空白——这类轮次始终展开展示
   const forceShow = items.length > 0 && !items.some((item) => !isProcessItem(item));
+  let lastUserIndex = -1;
+  items.forEach((item, index) => {
+    if (item.type === "userMessage") lastUserIndex = index;
+  });
   return (
     <section className="turn-block" data-status={turn.status}>
       {items.length === 0 && (
@@ -518,7 +603,13 @@ function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean 
       )}
       {items.map((item, index) => (
         processesOpen || forceShow || !isProcessItem(item)
-          ? <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} alwaysOpen={forceShow} />
+          ? <ItemView
+              key={item.id ?? `${turn.id}-${index}`}
+              item={item}
+              alwaysOpen={forceShow}
+              editable={editable && index === lastUserIndex}
+              onEdit={onEdit}
+            />
           : null
       ))}
       {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
@@ -527,12 +618,29 @@ function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean 
   );
 }
 
-function ItemView({ item, alwaysOpen = false }: { item: ThreadItem; alwaysOpen?: boolean }) {
+function ItemView({ item, alwaysOpen = false, editable = false, onEdit }: {
+  item: ThreadItem;
+  alwaysOpen?: boolean;
+  editable?: boolean;
+  onEdit?: (text: string) => void;
+}) {
   const detailProps = alwaysOpen ? { open: true, "data-always-open": "" } : {};
   if (item.type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     const text = content.map((entry) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : "")).filter(Boolean).join("\n");
-    return <article className="message user-message"><div className="message-label"><User size={14} />你</div><div className="message-body">{text}</div></article>;
+    return (
+      <article className="message user-message">
+        <div className="message-label">
+          <User size={14} />你
+          {editable && onEdit && (
+            <button type="button" className="edit-message-button" aria-label="修改这条需求" title="修改这条需求" onClick={() => onEdit(text)}>
+              <Pencil size={12} />
+            </button>
+          )}
+        </div>
+        <div className="message-body">{text}</div>
+      </article>
+    );
   }
   if (item.type === "agentMessage") {
     const phase = typeof item.phase === "string" ? item.phase : "final_answer";

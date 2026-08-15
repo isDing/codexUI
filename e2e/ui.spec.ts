@@ -293,6 +293,54 @@ test("slash commands: menu, execute, argument backfill, and // escape", async ({
   await page.unroute("**/api/threads/*/turns");
 });
 
+test("editing the last request re-executes and clears the old response", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  const lastTurn = page.locator(".turn-block").last();
+  const editButton = lastTurn.locator(".edit-message-button");
+  test.skip((await editButton.count()) === 0, "最后一条会话没有可修改的用户需求");
+  const originalText = (await lastTurn.locator(".user-message .message-body").last().textContent())?.trim() ?? "";
+  test.skip(!originalText, "原需求内容为空");
+
+  let retryBody: { text?: string } = {};
+  await page.route("**/api/threads/*/retry", async (route) => {
+    retryBody = (route.request().postDataJSON() ?? {}) as { text?: string };
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        turn: {
+          id: "e2e-retry-turn",
+          items: [{ id: "e2e-retry-final", type: "agentMessage", phase: "final_answer", text: "E2E 修改后的回答" }],
+          status: "inProgress",
+          error: null,
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: null,
+          durationMs: null,
+        },
+      }),
+    });
+  });
+
+  const composerArea = page.locator(".composer textarea");
+  await editButton.click();
+  await expect(composerArea).toHaveValue(originalText);
+  await expect(page.locator(".edit-mode-bar")).toBeVisible();
+  await composerArea.fill("E2E 修改后的需求");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => retryBody.text).toBe("E2E 修改后的需求");
+  await expect(page.locator(".user-message .message-body").filter({ hasText: "E2E 修改后的需求" })).toBeVisible();
+  await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 修改后的回答" })).toBeVisible();
+  // 原需求与旧回复已随回滚清除
+  await expect(page.locator(".user-message .message-body").filter({ hasText: originalText })).toHaveCount(0);
+  await expect(page.locator(".edit-mode-bar")).toHaveCount(0);
+  await page.unroute("**/api/threads/*/retry");
+});
+
 test("conversation view stays position-stable while older history loads", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 920 });
   await login(page);

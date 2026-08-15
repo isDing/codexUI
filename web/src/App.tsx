@@ -648,6 +648,23 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     }));
   };
 
+  const markTurnRetried = (threadId: string, turn: Turn) => {
+    const current = detailRef.current;
+    if (current && current.id === threadId) {
+      // 服务端已回滚最后一轮：移除旧轮次，用新轮次替换
+      const turns = [...current.turns.slice(0, -1), turn];
+      commitDetail(threadId, { ...current, status: { type: "active" }, turns });
+    }
+    setSnapshot((snap) => ({
+      ...snap,
+      threads: snap.threads.map((thread) =>
+        thread.id === threadId
+          ? { ...thread, status: { type: "active" }, updatedAt: Math.floor(Date.now() / 1000) }
+          : thread,
+      ),
+    }));
+  };
+
   const logout = async () => {
     try {
       await api.logout();
@@ -757,6 +774,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             onLoadOlder={fetchOlderHistory}
             onTurnStarted={appendStartedTurn}
             onTurnCancelled={markTurnCancelled}
+            onTurnRetried={markTurnRetried}
             onNewThread={() => setNewThreadOpen(true)}
             onPreferencesChange={setPreferences}
             onError={setError}

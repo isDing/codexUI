@@ -323,6 +323,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .tool-status.completed { color: var(--green); }
 .tool-status.failed, .tool-status.declined { color: var(--red); }
 .command-item > code { display: block; padding: 9px 11px; overflow-x: auto; color: #dbe7df; white-space: pre; background: #232825; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
+.command-merged-count { display: inline-grid; place-items: center; min-width: 18px; height: 16px; padding: 0 4px; color: #6f420d; background: #f6e7c8; border-radius: 4px; font-size: 10px; font-weight: 700; }
 .file-item ul { display: grid; gap: 4px; margin: 0; padding: 8px 12px 10px 29px; background: #fff; border-top: 1px solid var(--line); }
 .file-item li { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
 .system-note { display: flex; align-items: center; gap: 6px; justify-self: center; color: var(--muted); font-size: 10.5px; }

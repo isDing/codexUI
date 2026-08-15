@@ -72,7 +72,7 @@ export function Conversation({
   onLoadOlder: () => void;
   onTurnStarted: (threadId: string, turn: Turn) => void;
   onTurnCancelled: (threadId: string) => void;
-  onTurnRetried: (threadId: string, turn: Turn) => void;
+  onTurnRetried: (threadId: string, turn: Turn, rolledBackId?: string) => void;
   onNewThread: () => void;
   onPreferencesChange: (value: Preferences) => void;
   onError: (value: string) => void;
@@ -143,9 +143,10 @@ export function Conversation({
     details?.forEach((detail) => {
       // 纯过程内容的轮次始终展开，折叠开关只影响混排轮次
       if (detail.hasAttribute("data-always-open")) return;
-      detail.open = processesOpen;
+      // 任务进行中：命令等过程项默认折叠，只有过程消息展开
+      detail.open = active ? false : processesOpen;
     });
-  }, [processesOpen, thread.turns]);
+  }, [active, processesOpen, thread.turns]);
 
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
@@ -313,6 +314,9 @@ export function Conversation({
     if (!requestText || active || sending) return;
     setSending(true);
     onError("");
+    // 记录被回滚的轮次 id：WS 事件可能先于 HTTP 响应到达，按 id 过滤才能
+    // 精确定位旧轮次
+    const rolledBack = thread.turns[thread.turns.length - 1];
     try {
       const result = await api.retryTurn(thread.id, { text: requestText, ...preferences });
       const turn = result.turn
@@ -326,7 +330,7 @@ export function Conversation({
             completedAt: null,
             durationMs: null,
           };
-      onTurnRetried(thread.id, turn);
+      onTurnRetried(thread.id, turn, rolledBack?.id);
       setText("");
       setEditing(false);
     } catch (reason) {
@@ -440,6 +444,7 @@ export function Conversation({
                 key={turn.id}
                 turn={turn}
                 processesOpen={processesOpen}
+                live={active}
                 editable={!active && index === thread.turns.length - 1 && turn.status !== "inProgress"}
                 onEdit={startEdit}
               />
@@ -580,19 +585,60 @@ export function Conversation({
   );
 }
 
-function TurnView({ turn, processesOpen, editable, onEdit }: {
+function TurnView({ turn, processesOpen, editable, onEdit, live }: {
   turn: Turn;
   processesOpen: boolean;
   editable: boolean;
   onEdit: (text: string) => void;
+  live: boolean;
 }) {
   const items = turn.items;
-  // 整轮都是过程内容时，折叠会导致一片空白——这类轮次始终展开展示
-  const forceShow = items.length > 0 && !items.some((item) => !isProcessItem(item));
   let lastUserIndex = -1;
   items.forEach((item, index) => {
     if (item.type === "userMessage") lastUserIndex = index;
   });
+  // 任务进行中的精简实时视图：思考过程隐藏、相邻命令合并为一条（默认
+  // 折叠）、只有过程消息展开
+  if (live) {
+    const merged: Array<ThreadItem & { mergedCount?: number }> = [];
+    for (const item of items) {
+      if (item.type === "commandExecution") {
+        const previous = merged[merged.length - 1];
+        if (previous?.type === "commandExecution") {
+          previous.mergedCount = (previous.mergedCount ?? 1) + 1;
+          previous.command = item.command;
+          previous.aggregatedOutput = item.aggregatedOutput;
+          previous.status = item.status;
+          continue;
+        }
+        merged.push({ ...item, mergedCount: 1 });
+      } else {
+        merged.push(item);
+      }
+    }
+    return (
+      <section className="turn-block" data-status={turn.status}>
+        {merged.map((item, index) => {
+          if (item.type === "reasoning" || item.type === "plan") return null;
+          const commentary = item.type === "agentMessage" && item.phase === "commentary";
+          return (
+            <ItemView
+              key={item.id ?? `${turn.id}-${index}`}
+              item={item}
+              alwaysOpen={commentary}
+              mergedCount={item.mergedCount}
+              editable={editable && index === lastUserIndex}
+              onEdit={onEdit}
+            />
+          );
+        })}
+        {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
+        {turn.error !== null && turn.error !== undefined && <div className="turn-error"><CircleAlert size={16} />{stringify(turn.error)}</div>}
+      </section>
+    );
+  }
+  // 整轮都是过程内容时，折叠会导致一片空白——这类轮次始终展开展示
+  const forceShow = items.length > 0 && !items.some((item) => !isProcessItem(item));
   return (
     <section className="turn-block" data-status={turn.status}>
       {items.length === 0 && (
@@ -618,11 +664,12 @@ function TurnView({ turn, processesOpen, editable, onEdit }: {
   );
 }
 
-function ItemView({ item, alwaysOpen = false, editable = false, onEdit }: {
+function ItemView({ item, alwaysOpen = false, editable = false, onEdit, mergedCount }: {
   item: ThreadItem;
   alwaysOpen?: boolean;
   editable?: boolean;
   onEdit?: (text: string) => void;
+  mergedCount?: number;
 }) {
   const detailProps = alwaysOpen ? { open: true, "data-always-open": "" } : {};
   if (item.type === "userMessage") {
@@ -671,7 +718,11 @@ function ItemView({ item, alwaysOpen = false, editable = false, onEdit }: {
   if (item.type === "commandExecution") {
     return (
       <details className="tool-item command-item compact-tool" {...detailProps}>
-        <summary><TerminalSquare size={15} />命令<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
+        <summary>
+          <TerminalSquare size={15} />命令
+          {mergedCount && mergedCount > 1 ? <span className="command-merged-count">×{mergedCount}</span> : null}
+          <span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span>
+        </summary>
         <code>{String(item.command ?? "")}</code>
         {item.aggregatedOutput ? <pre>{String(item.aggregatedOutput)}</pre> : null}
       </details>

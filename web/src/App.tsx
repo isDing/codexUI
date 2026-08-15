@@ -648,11 +648,16 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     }));
   };
 
-  const markTurnRetried = (threadId: string, turn: Turn) => {
+  const markTurnRetried = (threadId: string, turn: Turn, rolledBackId?: string) => {
     const current = detailRef.current;
     if (current && current.id === threadId) {
-      // 服务端已回滚最后一轮：移除旧轮次，用新轮次替换
-      const turns = [...current.turns.slice(0, -1), turn];
+      // 服务端已回滚旧轮次。WS 事件可能已先行把新轮次追加进列表：
+      // 按 id 精确移除旧轮次并去重新轮次，而不是依赖位置。
+      if (rolledBackId) SUPPRESSED_TURN_IDS.add(rolledBackId);
+      const turns = [
+        ...current.turns.filter((entry) => entry.id !== rolledBackId && entry.id !== turn.id),
+        turn,
+      ];
       commitDetail(threadId, { ...current, status: { type: "active" }, turns });
     }
     setSnapshot((snap) => ({
@@ -842,10 +847,15 @@ function useActivityRefresh(api: ApiClient, auth: AuthState, onAuthChange: (valu
   }, [api, auth, onAuthChange]);
 }
 
+// 被回滚（修改重发）的轮次 id：codex 回滚后会补发这些轮次的完成事件，
+// 忽略它们以防旧对话内容被重新追加到界面
+const SUPPRESSED_TURN_IDS = new Set<string>();
+
 function mutateThreadFromEvent(thread: Thread, message: { method?: string; params?: Record<string, unknown> }): Thread {
   const next = cloneThread(thread);
   const params = message.params ?? {};
   const turnId = typeof params.turnId === "string" ? params.turnId : isRecord(params.turn) && typeof params.turn.id === "string" ? params.turn.id : null;
+  if (turnId && SUPPRESSED_TURN_IDS.has(turnId)) return next;
   if (message.method === "turn/started" && isRecord(params.turn)) {
     const turn = params.turn as Turn;
     const index = next.turns.findIndex((entry) => entry.id === turn.id);

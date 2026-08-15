@@ -327,18 +327,78 @@ test("editing the last request re-executes and clears the old response", async (
   });
 
   const composerArea = page.locator(".composer textarea");
+  const turnCountBefore = await page.locator(".turn-block").count();
   await editButton.click();
   await expect(composerArea).toHaveValue(originalText);
   await expect(page.locator(".edit-mode-bar")).toBeVisible();
   await composerArea.fill("E2E 修改后的需求");
   await page.keyboard.press("Enter");
   await expect.poll(() => retryBody.text).toBe("E2E 修改后的需求");
-  await expect(page.locator(".user-message .message-body").filter({ hasText: "E2E 修改后的需求" })).toBeVisible();
-  await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 修改后的回答" })).toBeVisible();
-  // 原需求与旧回复已随回滚清除
-  await expect(page.locator(".user-message .message-body").filter({ hasText: originalText })).toHaveCount(0);
+  // 轮次总数不变（旧轮被回滚移除、新轮替换）
+  await expect(page.locator(".turn-block")).toHaveCount(turnCountBefore);
+  const lastTurnAfter = page.locator(".turn-block").last();
+  await expect(lastTurnAfter.locator(".user-message .message-body").filter({ hasText: "E2E 修改后的需求" })).toBeVisible();
+  await expect(lastTurnAfter.locator(".agent-message .message-body").filter({ hasText: "E2E 修改后的回答" })).toBeVisible();
+  // 原需求与旧回复已随回滚清除（最后一条轮次块内不再出现）
+  await expect(lastTurnAfter.locator(".user-message .message-body").filter({ hasText: originalText })).toHaveCount(0);
   await expect(page.locator(".edit-mode-bar")).toHaveCount(0);
   await page.unroute("**/api/threads/*/retry");
+});
+
+test("live turn view: no reasoning, collapsed merged commands, open commentary", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+  await openFirstIdleThread(page);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  // 模拟一个进行中的轮次：思考过程 + 过程消息 + 3 条相邻命令 + 文件修改 + 最终回答
+  await page.route("**/api/threads/*/turns", async (route) => {
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        turn: {
+          id: "e2e-live-turn",
+          items: [
+            { id: "e2e-live-user", type: "userMessage", content: [{ type: "text", text: "E2E 实时视图测试" }] },
+            { id: "e2e-live-reasoning", type: "reasoning", summary: ["思考"], content: ["思考内容"] },
+            { id: "e2e-live-commentary", type: "agentMessage", phase: "commentary", text: "我先执行几条命令。" },
+            { id: "e2e-live-cmd1", type: "commandExecution", status: "completed", command: "cmd1", aggregatedOutput: "out1" },
+            { id: "e2e-live-cmd2", type: "commandExecution", status: "completed", command: "cmd2", aggregatedOutput: "out2" },
+            { id: "e2e-live-cmd3", type: "commandExecution", status: "completed", command: "cmd3", aggregatedOutput: "out3" },
+            { id: "e2e-live-file", type: "fileChange", status: "completed", changes: [{ path: "a.txt" }] },
+            { id: "e2e-live-final", type: "agentMessage", phase: "final_answer", text: "E2E 实时视图最终回答" },
+          ],
+          status: "inProgress",
+          error: null,
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: null,
+          durationMs: null,
+        },
+      }),
+    });
+  });
+
+  const composerArea = page.locator(".composer textarea");
+  await composerArea.fill("E2E 实时视图测试");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".user-message .message-body").filter({ hasText: "E2E 实时视图测试" })).toBeVisible();
+
+  const lastTurn = page.locator(".turn-block").last();
+  // 思考过程不显示
+  await expect(lastTurn.locator("details.reasoning-item")).toHaveCount(0);
+  // 相邻 3 条命令合并为一条且默认折叠
+  await expect(lastTurn.locator("details.command-item")).toHaveCount(1);
+  await expect(lastTurn.locator(".command-merged-count")).toHaveText("×3");
+  await expect(lastTurn.locator("details.command-item")).not.toHaveAttribute("open", "");
+  // 文件修改折叠
+  await expect(lastTurn.locator("details.file-item")).not.toHaveAttribute("open", "");
+  // 过程消息展开
+  await expect(lastTurn.locator("details.commentary-message")).toHaveAttribute("open", "");
+  // 最终回答与用户消息可见
+  await expect(lastTurn.locator(".agent-message .message-body").filter({ hasText: "E2E 实时视图最终回答" })).toBeVisible();
+  await page.unroute("**/api/threads/*/turns");
 });
 
 test("conversation view stays position-stable while older history loads", async ({ page }) => {

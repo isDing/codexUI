@@ -301,6 +301,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .file-item ul { display: grid; gap: 4px; margin: 0; padding: 8px 12px 10px 29px; background: #fff; border-top: 1px solid var(--line); }
 .file-item li { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
 .system-note { display: flex; align-items: center; gap: 6px; justify-self: center; color: var(--muted); font-size: 10.5px; }
+.interrupted-note { justify-self: stretch; padding: 7px 10px; color: #8a6a2f; background: var(--amber-soft); border: 1px solid #edd1a0; border-radius: 6px; }
 .working-indicator { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: 11px; font-weight: 650; }
 .turn-error { display: flex; align-items: flex-start; gap: 7px; padding: 9px 10px; color: #8d312c; background: var(--red-soft); border: 1px solid #edc6c2; border-radius: 6px; font-size: 11px; }
 .new-thread-state { display: grid; justify-items: center; gap: 7px; padding-top: 14vh; color: var(--muted); text-align: center; }

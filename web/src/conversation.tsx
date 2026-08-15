@@ -90,6 +90,8 @@ export function Conversation({
       "details.reasoning-item, details.commentary-message, details.tool-item",
     );
     details?.forEach((detail) => {
+      // 纯过程内容的轮次始终展开，折叠开关只影响混排轮次
+      if (detail.hasAttribute("data-always-open")) return;
       detail.open = processesOpen;
     });
   }, [processesOpen, thread.turns]);
@@ -254,11 +256,20 @@ export function Conversation({
 }
 
 function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean }) {
+  const items = turn.items;
+  // 整轮都是过程内容时，折叠会导致一片空白——这类轮次始终展开展示
+  const forceShow = items.length > 0 && !items.some((item) => !isProcessItem(item));
   return (
     <section className="turn-block" data-status={turn.status}>
-      {turn.items.map((item, index) => (
-        processesOpen || !isProcessItem(item)
-          ? <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} />
+      {items.length === 0 && (
+        <div className="system-note interrupted-note"><CircleAlert size={14} />该轮次没有可显示的内容（可能已被中断）</div>
+      )}
+      {items.length > 0 && turn.status === "interrupted" && (
+        <div className="system-note interrupted-note"><CircleAlert size={14} />该轮次已中断，以下为中断前的过程内容</div>
+      )}
+      {items.map((item, index) => (
+        processesOpen || forceShow || !isProcessItem(item)
+          ? <ItemView key={item.id ?? `${turn.id}-${index}`} item={item} alwaysOpen={forceShow} />
           : null
       ))}
       {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
@@ -267,7 +278,8 @@ function TurnView({ turn, processesOpen }: { turn: Turn; processesOpen: boolean 
   );
 }
 
-function ItemView({ item }: { item: ThreadItem }) {
+function ItemView({ item, alwaysOpen = false }: { item: ThreadItem; alwaysOpen?: boolean }) {
+  const detailProps = alwaysOpen ? { open: true, "data-always-open": "" } : {};
   if (item.type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     const text = content.map((entry) => (isRecord(entry) && typeof entry.text === "string" ? entry.text : "")).filter(Boolean).join("\n");
@@ -278,7 +290,7 @@ function ItemView({ item }: { item: ThreadItem }) {
     const content = String(item.text ?? "");
     if (phase === "commentary") {
       return (
-        <details className="message commentary-message">
+        <details className="message commentary-message" {...detailProps}>
           <summary className="message-label"><Bot size={15} />过程消息</summary>
           <div className="message-body markdown-body"><MarkdownContent content={content} /></div>
         </details>
@@ -289,11 +301,11 @@ function ItemView({ item }: { item: ThreadItem }) {
   if (item.type === "reasoning") {
     const summary = Array.isArray(item.summary) ? item.summary.join("\n") : "";
     const content = Array.isArray(item.content) ? item.content.join("\n") : "";
-    return <details className="reasoning-item"><summary><CircleDot size={15} />思考过程</summary><pre>{summary || content || "正在思考..."}</pre></details>;
+    return <details className="reasoning-item" {...detailProps}><summary><CircleDot size={15} />思考过程</summary><pre>{summary || content || "正在思考..."}</pre></details>;
   }
   if (item.type === "plan") {
     return (
-      <details className="tool-item compact-tool">
+      <details className="tool-item compact-tool" {...detailProps}>
         <summary><CircleCheck size={15} />计划<span className={`tool-status ${String(item.status ?? "")}`}>{toolStatus(item.status)}</span></summary>
         <pre>{String(item.text ?? "")}</pre>
       </details>
@@ -301,7 +313,7 @@ function ItemView({ item }: { item: ThreadItem }) {
   }
   if (item.type === "commandExecution") {
     return (
-      <details className="tool-item command-item compact-tool">
+      <details className="tool-item command-item compact-tool" {...detailProps}>
         <summary><TerminalSquare size={15} />命令<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
         <code>{String(item.command ?? "")}</code>
         {item.aggregatedOutput ? <pre>{String(item.aggregatedOutput)}</pre> : null}
@@ -311,7 +323,7 @@ function ItemView({ item }: { item: ThreadItem }) {
   if (item.type === "fileChange") {
     const changes = Array.isArray(item.changes) ? item.changes : [];
     return (
-      <details className="tool-item file-item compact-tool">
+      <details className="tool-item file-item compact-tool" {...detailProps}>
         <summary><FileCode2 size={15} />文件修改<span className={`tool-status ${String(item.status)}`}>{toolStatus(item.status)}</span></summary>
         <ul>{changes.map((change, index) => <li key={index}>{changePath(change)}</li>)}</ul>
       </details>
@@ -319,7 +331,7 @@ function ItemView({ item }: { item: ThreadItem }) {
   }
   if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch"].includes(item.type)) {
     return (
-      <details className="tool-item compact-tool">
+      <details className="tool-item compact-tool" {...detailProps}>
         <summary><Wrench size={15} />{toolName(item)}<span className={`tool-status ${String(item.status ?? "")}`}>{toolStatus(item.status)}</span></summary>
         <pre>{stringify(item)}</pre>
       </details>

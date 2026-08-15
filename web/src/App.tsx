@@ -54,6 +54,16 @@ const SELECTION_KEYS = {
   thread: "codex-ui.selected-thread",
 } as const;
 
+const THREAD_CACHE_MAX = 25;
+const READ_TIMEOUT_MS = 20_000;
+
+type ThreadCacheEntry = {
+  thread: Thread;
+  preferences: Preferences;
+  historyCursor: string | null;
+  loadedAt: number;
+};
+
 const readSelection = (key: string): string | null => {
   try {
     return window.localStorage.getItem(key);
@@ -79,6 +89,15 @@ export function App() {
         setAuth({ authenticated: false });
       }),
     [],
+  );
+
+  // 引用稳定：避免每次活动续期触发 Dashboard 重建 WebSocket 连接
+  const handleAuthChange = useCallback(
+    (next: AuthState) => {
+      api.setCsrfToken(next.csrfToken);
+      setAuth(next);
+    },
+    [api],
   );
 
   useEffect(() => {
@@ -108,10 +127,7 @@ export function App() {
     <Dashboard
       api={api}
       auth={auth}
-      onAuthChange={(next) => {
-        api.setCsrfToken(next.csrfToken);
-        setAuth(next);
-      }}
+      onAuthChange={handleAuthChange}
     />
   );
 }
@@ -197,6 +213,10 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const restoreThreadRef = useRef<string | null>(null);
   const detailRequestRef = useRef(0);
   const autoHistoryRef = useRef(true);
+  const detailRef = useRef<Thread | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const inflightRef = useRef<Map<string, Promise<void>>>(new Map());
+  const threadCacheRef = useRef<Map<string, ThreadCacheEntry>>(new Map());
 
   selectedRef.current = selectedThreadId;
 
@@ -208,10 +228,33 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     writeSelection(SELECTION_KEYS.thread, selectedThreadId);
   }, [selectedThreadId]);
 
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
+
   useActivityRefresh(api, auth, onAuthChange);
 
   const updateSnapshot = useCallback((incoming: Partial<Snapshot>) => {
     setSnapshot((current) => ({ ...current, ...incoming }));
+  }, []);
+
+  const commitDetail = useCallback((threadId: string, thread: Thread) => {
+    detailRef.current = thread;
+    setDetail(thread);
+    const entry = threadCacheRef.current.get(threadId);
+    if (entry) threadCacheRef.current.set(threadId, { ...entry, thread });
+  }, []);
+
+  const pruneThreadCache = useCallback(() => {
+    const cache = threadCacheRef.current;
+    while (cache.size > THREAD_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
   }, []);
 
   const applyCodexEvent = useCallback((message: { method?: string; params?: Record<string, unknown> }) => {
@@ -231,8 +274,10 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     }));
 
     if (selectedRef.current !== threadId) return;
-    setDetail((current) => (current ? mutateThreadFromEvent(current, message) : current));
-  }, []);
+    const current = detailRef.current;
+    if (!current) return;
+    commitDetail(threadId, mutateThreadFromEvent(current, message));
+  }, [commitDetail]);
 
   useEffect(() => {
     let cancelled = false;
@@ -324,30 +369,112 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     };
   }, [applyCodexEvent, onAuthChange, updateSnapshot]);
 
-  const selectThread = async (thread: Thread) => {
-    const requestId = ++detailRequestRef.current;
-    setSelectedThreadId(thread.id);
-    setSelectedWorkspace(thread.cwd);
-    setDrawer(null);
-    setDetail(null);
-    setHistoryCursor(null);
-    setHistoryLoading(false);
-    setDetailLoading(true);
-    setError("");
-    autoHistoryRef.current = true;
-    socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: thread.id }));
-    try {
-      const [value, unread] = await Promise.all([api.readThread(thread.id), api.markRead(thread.id)]);
-      if (detailRequestRef.current !== requestId) return;
+  const maybeMarkRead = useCallback((threadId: string) => {
+    if (!snapshot.unreadThreadIds.includes(threadId)) return;
+    void api
+      .markRead(threadId)
+      .then(({ unreadThreadIds }) => updateSnapshot({ unreadThreadIds }))
+      .catch(() => undefined);
+  }, [api, snapshot.unreadThreadIds, updateSnapshot]);
+
+  const applyThreadLoad = useCallback(
+    (threadId: string, value: { thread: Thread; preferences: Preferences; nextCursor: string | null }) => {
+      threadCacheRef.current.set(threadId, {
+        thread: value.thread,
+        preferences: value.preferences,
+        historyCursor: value.nextCursor,
+        loadedAt: Date.now(),
+      });
+      pruneThreadCache();
+      detailRef.current = value.thread;
       setDetail(value.thread);
       setHistoryCursor(value.nextCursor);
       setPreferences(normalizePreferences(value.preferences, snapshot.models));
-      updateSnapshot({ unreadThreadIds: unread.unreadThreadIds });
-    } catch (reason) {
-      if (detailRequestRef.current === requestId) setError(errorMessage(reason));
-    } finally {
-      if (detailRequestRef.current === requestId) setDetailLoading(false);
+    },
+    [pruneThreadCache, snapshot.models],
+  );
+
+  const selectThread = (thread: Thread) => {
+    const requestId = ++detailRequestRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(READ_TIMEOUT_MS)]);
+    setSelectedThreadId(thread.id);
+    setSelectedWorkspace(thread.cwd);
+    setDrawer(null);
+    setError("");
+    socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: thread.id }));
+
+    const cached = threadCacheRef.current.get(thread.id);
+    const stale = cached !== undefined && cached.thread.updatedAt !== thread.updatedAt;
+
+    if (cached && !stale) {
+      // 缓存命中：立即渲染，不出现整屏加载
+      autoHistoryRef.current = false;
+      setHistoryLoading(false);
+      setDetailLoading(false);
+      detailRef.current = cached.thread;
+      setDetail(cached.thread);
+      setHistoryCursor(cached.historyCursor);
+      setPreferences(normalizePreferences(cached.preferences, snapshot.models));
+      maybeMarkRead(thread.id);
+      return;
     }
+
+    // 缓存未命中（或已过期）：需要加载。过期缓存先展示、后台静默刷新。
+    autoHistoryRef.current = true;
+    setHistoryLoading(false);
+    setDetailLoading(cached === undefined);
+    if (cached) {
+      detailRef.current = cached.thread;
+      setDetail(cached.thread);
+      setHistoryCursor(cached.historyCursor);
+      setPreferences(normalizePreferences(cached.preferences, snapshot.models));
+    } else {
+      detailRef.current = null;
+      setDetail(null);
+      setHistoryCursor(null);
+    }
+
+    const load = async (): Promise<void> => {
+      const [value, unread] = await Promise.all([
+        api.readThread(thread.id, { signal }),
+        api.markRead(thread.id, { signal }),
+      ]);
+      if (detailRequestRef.current !== requestId) return;
+      applyThreadLoad(thread.id, value);
+      updateSnapshot({ unreadThreadIds: unread.unreadThreadIds });
+      setDetailLoading(false);
+    };
+
+    const existing = inflightRef.current.get(thread.id);
+    const promise = existing ?? load();
+    inflightRef.current.set(thread.id, promise);
+    void promise
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted || detailRequestRef.current !== requestId) return;
+        const staleEntry = threadCacheRef.current.get(thread.id);
+        if (staleEntry) {
+          // 刷新失败：继续使用过期缓存，仅提示错误
+          detailRef.current = staleEntry.thread;
+          setDetail(staleEntry.thread);
+          setHistoryCursor(staleEntry.historyCursor);
+          setError(errorMessage(reason));
+        } else if (reason instanceof DOMException && reason.name === "TimeoutError") {
+          setDetail(null);
+          setHistoryCursor(null);
+          setError("加载超时，请重新点击会话重试");
+        } else {
+          setDetail(null);
+          setHistoryCursor(null);
+          setError(errorMessage(reason));
+        }
+      })
+      .finally(() => {
+        inflightRef.current.delete(thread.id);
+        if (detailRequestRef.current === requestId) setDetailLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -366,25 +493,28 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     const threadId = detail.id;
     const cursor = historyCursor;
     const requestId = detailRequestRef.current;
+    const signal = abortRef.current?.signal;
     setHistoryLoading(true);
     void api
-      .readThreadHistory(threadId, cursor)
+      .readThreadHistory(threadId, cursor, { signal })
       .then((page) => {
         if (detailRequestRef.current !== requestId || selectedRef.current !== threadId) return;
-        setDetail((current) => current?.id === threadId
-          ? { ...current, turns: mergeHistoricalTurns(page.turns, current.turns) }
-          : current);
+        const current = detailRef.current;
+        if (!current || current.id !== threadId) return;
+        commitDetail(threadId, { ...current, turns: mergeHistoricalTurns(page.turns, current.turns) });
         setHistoryCursor(page.nextCursor);
+        const entry = threadCacheRef.current.get(threadId);
+        if (entry) threadCacheRef.current.set(threadId, { ...entry, historyCursor: page.nextCursor });
       })
       .catch((reason) => {
-        if (detailRequestRef.current !== requestId) return;
+        if (signal?.aborted || detailRequestRef.current !== requestId) return;
         setHistoryCursor(null);
         setError(`较早历史记录加载失败：${errorMessage(reason)}`);
       })
       .finally(() => {
         if (detailRequestRef.current === requestId) setHistoryLoading(false);
       });
-  }, [api, detail, detailLoading, historyCursor, historyLoading, snapshot.threads]);
+  }, [api, commitDetail, detail, detailLoading, historyCursor, historyLoading, snapshot.threads]);
 
   // 打开会话后自动补一页较早记录；更多历史由「加载更早的记录」按钮按需拉取，
   // 避免对超大会话产生无休止的顺序请求。
@@ -416,16 +546,26 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const createThread = async (cwd: string, value: Preferences) => {
     const result = await api.createThread({ cwd, ...value });
     detailRequestRef.current += 1;
+    abortRef.current?.abort();
     autoHistoryRef.current = false;
+    threadCacheRef.current.set(result.thread.id, {
+      thread: result.thread,
+      preferences: result.preferences,
+      historyCursor: null,
+      loadedAt: Date.now(),
+    });
+    pruneThreadCache();
     setSnapshot((current) => ({
       ...current,
       threads: [result.thread, ...current.threads.filter((thread) => thread.id !== result.thread.id)],
     }));
     setSelectedWorkspace(cwd);
     setSelectedThreadId(result.thread.id);
+    detailRef.current = result.thread;
     setDetail(result.thread);
     setHistoryCursor(null);
     setHistoryLoading(false);
+    setDetailLoading(false);
     setPreferences(result.preferences);
     setNewThreadOpen(false);
     socketRef.current?.send(JSON.stringify({ type: "viewing", threadId: result.thread.id }));
@@ -440,15 +580,14 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   };
 
   const appendStartedTurn = (threadId: string, turn: Turn) => {
-    setDetail((current) => {
-      if (!current || current.id !== threadId) return current;
-      const index = current.turns.findIndex((entry) => entry.id === turn.id);
-      const turns = [...current.turns];
-      const existing = index >= 0 ? turns[index] : undefined;
-      if (existing) turns[index] = mergeTurn(existing, turn);
-      else turns.push(turn);
-      return { ...current, status: { type: "active" }, turns };
-    });
+    const current = detailRef.current;
+    if (!current || current.id !== threadId) return;
+    const index = current.turns.findIndex((entry) => entry.id === turn.id);
+    const turns = [...current.turns];
+    const existing = index >= 0 ? turns[index] : undefined;
+    if (existing) turns[index] = mergeTurn(existing, turn);
+    else turns.push(turn);
+    commitDetail(threadId, { ...current, status: { type: "active" }, turns });
   };
 
   const logout = async () => {

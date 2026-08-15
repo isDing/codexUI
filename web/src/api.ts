@@ -1,5 +1,7 @@
 import type { AuthState, HistoryPage, Preferences, Snapshot, Thread, Turn } from "./types";
 
+type RequestOptions = { signal?: AbortSignal };
+
 export class ApiClient {
   private csrfToken = "";
 
@@ -33,16 +35,16 @@ export class ApiClient {
     return this.request("/api/workspaces", this.writeOptions({ path }));
   }
 
-  readThread(threadId: string): Promise<{ thread: Thread; preferences: Preferences; nextCursor: string | null }> {
-    return this.request(`/api/threads/${encodeURIComponent(threadId)}`);
+  readThread(threadId: string, options: RequestOptions = {}): Promise<{ thread: Thread; preferences: Preferences; nextCursor: string | null }> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}`, { signal: options.signal });
   }
 
-  readThreadHistory(threadId: string, cursor: string): Promise<HistoryPage> {
-    return this.request(`/api/threads/${encodeURIComponent(threadId)}/history?cursor=${encodeURIComponent(cursor)}`);
+  readThreadHistory(threadId: string, cursor: string, options: RequestOptions = {}): Promise<HistoryPage> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}/history?cursor=${encodeURIComponent(cursor)}`, { signal: options.signal });
   }
 
-  markRead(threadId: string): Promise<{ unreadThreadIds: string[] }> {
-    return this.request(`/api/threads/${encodeURIComponent(threadId)}/read`, this.writeOptions());
+  markRead(threadId: string, options: RequestOptions = {}): Promise<{ unreadThreadIds: string[] }> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}/read`, { ...this.writeOptions(), signal: options.signal });
   }
 
   createThread(value: { cwd: string } & Preferences): Promise<{ thread: Thread; preferences: Preferences }> {

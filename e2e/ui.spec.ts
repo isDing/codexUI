@@ -16,6 +16,9 @@ async function login(page: Page) {
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** 会话内容可见的判定：消息、空会话占位、过程项或中断提示任一出现即可 */
+const CONTENT = ".message, .new-thread-state, .reasoning-item, .tool-item, .interrupted-note";
+
 /** 选择第一个「会话数不为 0」的工作区，并返回其路径（不依赖任何硬编码数据）。 */
 async function openFirstPopulatedWorkspace(page: Page): Promise<string> {
   const rows = page.locator(".workspace-row");
@@ -61,14 +64,14 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   await openFirstIdleThread(page);
 
   // 历史渲染：空会话显示新会话占位，否则至少有一条消息
-  await expect(page.locator(".message, .new-thread-state").first()).toBeVisible();
+  await expect(page.locator(CONTENT).first()).toBeVisible();
   const agentBody = page.locator(".agent-message .markdown-body");
   if ((await agentBody.count()) > 0) await expect(agentBody.first()).toBeVisible();
 
-  // 过程展开/收起
+  // 过程展开/收起（纯过程内容的轮次始终展示，不受折叠开关影响）
   const processDetails = page.locator("details.reasoning-item, details.tool-item, details.commentary-message");
   const openProcessDetails = page.locator("details.reasoning-item[open], details.tool-item[open], details.commentary-message[open]");
-  expect(await processDetails.count()).toBe(0);
+  const initialOpen = await openProcessDetails.count();
   await page.getByRole("button", { name: "展开过程" }).click();
   await expect(page.getByRole("button", { name: "收起过程" })).toBeVisible();
   const processCount = await processDetails.count();
@@ -77,7 +80,7 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
     await expect(processDetails.first()).toBeVisible();
   }
   await page.getByRole("button", { name: "收起过程" }).click();
-  await expect.poll(() => processDetails.count()).toBe(0);
+  await expect.poll(() => openProcessDetails.count()).toBe(initialOpen);
   await page.screenshot({ path: "test-results/conversation-desktop.png", fullPage: true });
 
   // 记录当前会话的偏好设置与所在工作区
@@ -132,8 +135,37 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   await page.unroute("**/api/threads/*/turns");
 });
 
-test("mobile drawers and conversation remain usable", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+test("switching between threads stays instant and never wedges on the loading screen", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 920 });
+  await login(page);
+  await openFirstPopulatedWorkspace(page);
+
+  const threads = page.locator(".thread-row");
+  await expect(threads.first()).toBeVisible();
+  const count = await threads.count();
+  test.skip(count < 2, "需要至少两个会话");
+
+  // 首次加载两个会话
+  await threads.nth(0).click();
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+  await threads.nth(1).click();
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  // 切回第一个会话：缓存命中，不应出现整屏加载动画
+  await threads.nth(0).click();
+  await expect(page.locator(".history-loading")).toHaveCount(0);
+  await expect(page.locator(CONTENT).first()).toBeVisible();
+
+  // 快速连续切换后必须能稳定恢复到内容视图（防止加载状态卡死）
+  for (let i = 0; i < Math.min(count, 8); i++) {
+    await threads.nth(i).click();
+    await page.waitForTimeout(40);
+  }
+  await expect(page.locator(".history-loading")).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(CONTENT).first()).toBeVisible({ timeout: 15_000 });
+});
+
+test("mobile drawers and conversation remain usable", async ({ page }) => {  await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
 
   await page.getByRole("button", { name: "工作区", exact: true }).click();
@@ -145,7 +177,7 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {
   await openFirstPopulatedWorkspace(page);
   await expect(page.locator(".thread-sidebar.drawer-open")).toBeVisible();
   await page.locator(".thread-row").first().click();
-  await expect(page.locator(".message, .new-thread-state").first()).toBeVisible();
+  await expect(page.locator(CONTENT).first()).toBeVisible();
   await page.screenshot({ path: "test-results/conversation-mobile.png", fullPage: true });
 
   const dimensions = await page.evaluate(() => ({

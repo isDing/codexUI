@@ -84,6 +84,13 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
   );
   app.use(express.json({ limit: "2mb" }));
 
+  // API 响应一律禁止缓存：会话数据敏感且变化频繁，
+  // 客户端已有内存缓存层，HTTP 层不应产生 304 往返
+  app.use("/api", (_request: Request, response: Response, next: () => void) => {
+    response.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
   // 请求日志：记录方法、路径、状态码与耗时（跳过健康检查噪音）
   app.use((request: Request, response: Response, next: () => void) => {
     if (request.path === "/api/health") {

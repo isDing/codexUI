@@ -115,18 +115,37 @@ type PersistedSettingsResult = ThreadPreferences | null;
 
 const PENDING_THREAD_TTL_MS = 5 * 60_000;
 const MAX_PERSISTED_SETTINGS_SCAN_BYTES = 2 * 1024 * 1024;
+const READ_CACHE_TTL_MS = 10_000;
+const PREF_SCAN_CACHE_TTL_MS = 30_000;
+const MAX_CACHE_ENTRIES = 500;
+
+type ReadThreadResult = {
+  thread: CodexThread;
+  preferences: ThreadPreferences;
+  nextCursor: string | null;
+};
 
 export class CodexService extends EventEmitter {
   private readonly rpc: CodexAppServer;
   private readonly threads = new Map<string, CodexThread>();
   private readonly pendingThreads = new Map<string, CodexThread>();
   private readonly pendingSince = new Map<string, number>();
+  private readonly readCache = new Map<string, { at: number; updatedAt: number; value: ReadThreadResult }>();
+  private readonly prefScanCache = new Map<string, { at: number; threadUpdatedAt: number; prefs: ThreadPreferences | null }>();
   private models: CodexModel[] = [];
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
   private connected = false;
+
+  private cachePrune(map: Map<string, unknown>): void {
+    while (map.size > MAX_CACHE_ENTRIES) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest as string);
+    }
+  }
 
   constructor(
     private readonly config: AppConfig,
@@ -177,6 +196,13 @@ export class CodexService extends EventEmitter {
   async readThread(threadId: string) {
     const pending = this.pendingThreads.get(threadId);
     if (pending) return { thread: pending, preferences: this.db.getPreferences(threadId), nextCursor: null };
+    const now = Date.now();
+    const listThread = this.threads.get(threadId);
+    const listUpdatedAt = listThread?.updatedAt ?? 0;
+    const cached = this.readCache.get(threadId);
+    if (cached && cached.updatedAt === listUpdatedAt && now - cached.at < READ_CACHE_TTL_MS) {
+      return cached.value;
+    }
     const [result, history] = await Promise.all([
       this.rpc.request<{ thread: CodexThread }>("thread/read", {
         threadId,
@@ -193,7 +219,11 @@ export class CodexService extends EventEmitter {
     const fallback = this.db.getPreferences(threadId);
     const preferences = (await this.readPersistedPreferences(thread, fallback)) ?? fallback;
     this.db.setPreferences(threadId, preferences);
-    return { thread, preferences, nextCursor: history.nextCursor };
+    const value = { thread, preferences, nextCursor: history.nextCursor };
+    // 短 TTL 结果缓存：吸收快速来回切换会话带来的重复读取
+    this.readCache.set(threadId, { at: Date.now(), updatedAt: listUpdatedAt, value });
+    this.cachePrune(this.readCache);
+    return value;
   }
 
   async readThreadHistory(threadId: string, cursor: string | null, limit = HISTORY_PAGE_SIZE) {
@@ -474,9 +504,21 @@ export class CodexService extends EventEmitter {
 
   private async readPersistedPreferences(thread: CodexThread, fallback: ThreadPreferences): Promise<PersistedSettingsResult> {
     if (!thread.path) return null;
+    const now = Date.now();
+    const scanCached = this.prefScanCache.get(thread.id);
+    if (scanCached && scanCached.threadUpdatedAt === thread.updatedAt && now - scanCached.at < PREF_SCAN_CACHE_TTL_MS) {
+      return scanCached.prefs;
+    }
+    const prefs = await this.scanPersistedPreferences(thread.path, fallback);
+    this.prefScanCache.set(thread.id, { at: Date.now(), threadUpdatedAt: thread.updatedAt, prefs });
+    this.cachePrune(this.prefScanCache);
+    return prefs;
+  }
+
+  private async scanPersistedPreferences(filePath: string, fallback: ThreadPreferences): Promise<PersistedSettingsResult> {
     const chunkSize = 64 * 1024;
     try {
-      const file = await fs.open(thread.path, "r");
+      const file = await fs.open(filePath, "r");
       try {
         const size = (await file.stat()).size;
         let position = size;

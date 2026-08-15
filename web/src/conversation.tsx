@@ -71,13 +71,32 @@ export function Conversation({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const atBottomRef = useRef(true);
   const scrollStateRef = useRef({ threadId: "", firstTurnId: "", lastTurnId: "", height: 0 });
   const active = listThread.status.type === "active" || thread.status.type === "active";
   const previousActiveRef = useRef(active);
   const [processesOpen, setProcessesOpen] = useState(active);
+  const [isMobileLayout, setIsMobileLayout] = useState(
+    () => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 820px)").matches,
+  );
   const selectedModel = modelFor(models, preferences.model);
   const efforts = selectedModel?.supportedReasoningEfforts ?? [];
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 820px)");
+    const onChange = () => setIsMobileLayout(query.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  // 输入框高度随内容自适应：默认单行，最多 150px
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 36), 150)}px`;
+  }, [text, active]);
 
   useEffect(() => {
     if (active === previousActiveRef.current) return;
@@ -234,17 +253,26 @@ export function Conversation({
       <footer className="composer-shell">
         <div className="composer">
           <textarea
+            ref={composerRef}
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key !== "Enter") return;
+              // 中文输入法选词期间的回车不触发发送
+              if (event.nativeEvent.isComposing) return;
+              if (isMobileLayout) {
+                // 移动端：回车换行（默认行为），发送按钮负责发送
+                return;
+              }
+              // 电脑端：Enter 发送，Shift+Enter 走默认换行
+              if (!event.shiftKey) {
                 event.preventDefault();
                 void send();
               }
             }}
-            placeholder={active ? "任务进行中" : "发送新的需求"}
+            placeholder={active ? "任务进行中" : isMobileLayout ? "输入需求，回车换行" : "发送新的需求"}
             disabled={active}
-            rows={2}
+            rows={1}
           />
           <button className="send-button" onClick={() => void send()} disabled={active || sending || !text.trim()} title="发送">
             {sending ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}

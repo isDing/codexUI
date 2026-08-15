@@ -330,7 +330,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .composer-shell { padding: 11px 18px 14px; background: #fff; border-top: 1px solid var(--line); }
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: end; gap: 8px; width: min(100%, 900px); margin: 0 auto; padding: 8px 8px 8px 12px; background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 2px 8px rgba(20,25,22,0.05); }
 .composer:focus-within { border-color: #739f87; box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.08); }
-.composer textarea { width: 100%; min-height: 44px; max-height: 150px; padding: 3px 0; resize: none; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 13px; line-height: 1.55; }
+.composer textarea { width: 100%; min-height: 36px; max-height: 150px; padding: 4px 0; resize: none; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 13px; line-height: 1.55; }
 .composer textarea::placeholder { color: #9aa19d; }
 .send-button { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; color: #fff; background: var(--dark); border: 0; border-radius: 5px; cursor: pointer; }
 
@@ -392,6 +392,8 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
   /* iOS Safari 会在聚焦字号 <16px 的输入框时自动放大页面：
      移动端所有表单控件统一 16px，从根源上禁用自动缩放（收起键盘后也不会残留缩放） */
   input, textarea, select { font-size: 16px !important; }
+  /* 模型/思考强度选择器保持原字号（select 不会触发 iOS 自动缩放） */
+  .session-controls select { font-size: 11px !important; }
   .app-shell { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px minmax(0, 1fr); }
   .topbar { grid-column: 1; }
   .topbar-brand { flex: 1; }

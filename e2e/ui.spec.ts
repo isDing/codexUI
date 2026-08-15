@@ -45,7 +45,7 @@ async function openFirstIdleThread(page: Page) {
   const thread = page.locator(".thread-row").filter({ hasNot: page.locator(".active-icon") }).first();
   await expect(thread).toBeVisible();
   await thread.click();
-  await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
+  await expect(page.getByPlaceholder(/发送新的需求|输入需求，回车换行/)).toBeVisible();
 }
 
 test("desktop login, thread navigation, and history rendering", async ({ page }) => {
@@ -125,9 +125,19 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
       }),
     });
   });
+  const composer = page.getByPlaceholder("发送新的需求");
+
+  // 电脑端：Shift+Enter 只换行不发送
+  const newlineText = "E2E 换行测试";
+  await composer.fill(newlineText);
+  await page.keyboard.press("Shift+Enter");
+  await expect(composer).toHaveValue(`${newlineText}\n`);
+  await expect(page.locator(".user-message .message-body").filter({ hasText: newlineText })).toHaveCount(0);
+
+  // 电脑端：Enter 发送
   const requestEcho = "E2E 用户消息回显";
-  await page.getByPlaceholder("发送新的需求").fill(requestEcho);
-  await page.getByTitle("发送").click();
+  await composer.fill(requestEcho);
+  await page.keyboard.press("Enter");
   await expect(page.locator(".user-message .message-body").filter({ hasText: requestEcho })).toBeVisible();
   await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 模拟最终回答" })).toBeVisible();
   const messageOrder = await page.locator(".turn-block").last().locator(".message").evaluateAll((messages) => messages.map((message) => message.textContent ?? ""));
@@ -225,9 +235,38 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await openFirstPopulatedWorkspace(page);
   await expect(page.locator(".thread-sidebar.drawer-open")).toBeVisible();
-  await page.locator(".thread-row").first().click();
+  await openFirstIdleThread(page);
   await expect(page.locator(CONTENT).first()).toBeVisible();
   await page.screenshot({ path: "test-results/conversation-mobile.png", fullPage: true });
+
+  // 移动端：回车只换行不发送，发送按钮负责发送
+  await page.route("**/api/threads/*/turns", async (route) => {
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        turn: {
+          id: "e2e-mobile-turn",
+          items: [{ id: "e2e-mobile-final", type: "agentMessage", phase: "final_answer", text: "E2E 移动端模拟回答" }],
+          status: "inProgress",
+          error: null,
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: null,
+          durationMs: null,
+        },
+      }),
+    });
+  });
+  const composer = page.getByPlaceholder("输入需求，回车换行");
+  const mobileEcho = "E2E 移动端回车换行";
+  await composer.fill(mobileEcho);
+  await page.keyboard.press("Enter");
+  await expect(composer).toHaveValue(`${mobileEcho}\n`);
+  await expect(page.locator(".user-message .message-body").filter({ hasText: mobileEcho })).toHaveCount(0);
+  await page.getByTitle("发送").click();
+  await expect(page.locator(".user-message .message-body").filter({ hasText: mobileEcho })).toBeVisible();
+  await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 移动端模拟回答" })).toBeVisible();
+  await page.unroute("**/api/threads/*/turns");
 
   const dimensions = await page.evaluate(() => ({
     viewport: document.documentElement.clientWidth,
@@ -247,4 +286,7 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   // iOS 自动缩放防护：移动端输入控件字号必须 ≥16px，否则聚焦时页面会被系统放大
   const inputFont = await page.locator(".composer textarea").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(inputFont).toBeGreaterThanOrEqual(16);
+  // 模型/思考强度选择器保持小字号，不受 16px 规则影响
+  const modelSelectFont = await page.locator(".session-controls select").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(modelSelectFont).toBeLessThan(16);
 });

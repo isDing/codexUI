@@ -184,7 +184,15 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
     viewport: document.documentElement.clientWidth,
     content: document.documentElement.scrollWidth,
     composer: document.querySelector(".composer")?.getBoundingClientRect().toJSON(),
+    scroller: (() => {
+      const el = document.querySelector(".conversation-scroll");
+      return el ? { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth } : null;
+    })(),
   }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
   expect(dimensions.composer?.width).toBeGreaterThan(300);
+  // 消息区不允许横向溢出：长代码块等宽内容必须在气泡内部滚动，而不是撑宽页面
+  if (dimensions.scroller) {
+    expect(dimensions.scroller.scrollWidth).toBeLessThanOrEqual(dimensions.scroller.clientWidth + 1);
+  }
 });

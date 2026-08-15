@@ -276,8 +276,10 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .agent-message { justify-self: start; }
 .message-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .user-message .message-label { justify-content: flex-end; }
-.message-body { padding: 11px 13px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; line-height: 1.65; }
-.markdown-body { white-space: normal; }
+/* min-width:0 允许气泡收缩，代码块等宽内容在内部滚动，避免个别消息比其他消息宽 */
+.message-body { min-width: 0; padding: 11px 13px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; line-height: 1.65; }
+.markdown-body { min-width: 0; white-space: normal; }
+.markdown-body pre { max-width: 100%; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
 .markdown-body p { margin: 0.55em 0; }
@@ -303,7 +305,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .commentary-message summary::before { width: 0; height: 0; margin-right: 2px; content: ""; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 5px solid currentColor; transition: transform 140ms ease; }
 .commentary-message[open] summary::before { transform: rotate(90deg); }
 .commentary-message .message-body { margin-top: 7px; background: #f7f9f7; border-top-left-radius: 2px; }
-.reasoning-item, .tool-item { max-width: 88%; overflow: hidden; background: #f3f6f4; border: 1px solid var(--line); border-radius: 6px; font-size: 11.5px; }
+.reasoning-item, .tool-item { max-width: 88%; min-width: 0; overflow: hidden; background: #f3f6f4; border: 1px solid var(--line); border-radius: 6px; font-size: 11.5px; }
 .reasoning-item summary, .compact-tool summary { display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: #59625d; cursor: pointer; font-weight: 650; list-style: none; }
 .reasoning-item summary::-webkit-details-marker, .compact-tool summary::-webkit-details-marker { display: none; }
 .reasoning-item pre, .tool-item pre { max-height: 320px; margin: 0; overflow: auto; padding: 10px 12px; color: #4f5853; white-space: pre-wrap; overflow-wrap: anywhere; background: #fff; border-top: 1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.55; }

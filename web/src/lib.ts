@@ -3,6 +3,15 @@ import type { Model, Preferences, Thread, ThreadItem, Turn } from "./types";
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+/** structuredClone 兼容旧浏览器（iOS<15.4）的降级实现 */
+export const cloneThread = (thread: Thread): Thread => {
+  try {
+    return typeof structuredClone === "function" ? structuredClone(thread) : JSON.parse(JSON.stringify(thread)) as Thread;
+  } catch {
+    return thread;
+  }
+};
+
 export const stringify = (value: unknown): string => {
   if (typeof value === "string") return value;
   try {

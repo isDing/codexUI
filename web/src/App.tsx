@@ -29,6 +29,7 @@ import { EmptyConversation, IconButton, LoadingScreen, SidebarHeading, ThreadRow
 import { ApprovalBar, Conversation } from "./conversation";
 import { NewThreadDialog, WorkspaceDialog } from "./dialogs";
 import {
+  cloneThread,
   errorMessage,
   isRecord,
   mergeHistoricalTurns,
@@ -399,7 +400,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(READ_TIMEOUT_MS)]);
     setSelectedThreadId(thread.id);
     setSelectedWorkspace(thread.cwd);
     setDrawer(null);
@@ -423,6 +423,13 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     }
 
     // 缓存未命中（或已过期）：需要加载。过期缓存先展示、后台静默刷新。
+    // 手动超时（不用 AbortSignal.any/timeout，兼容 iOS<17.4 等旧移动浏览器）
+    let timedOut = false;
+    const timeoutTimer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("加载超时", "TimeoutError"));
+    }, READ_TIMEOUT_MS);
+    const signal = controller.signal;
     autoHistoryRef.current = true;
     setHistoryLoading(false);
     setDetailLoading(cached === undefined);
@@ -453,7 +460,22 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     inflightRef.current.set(thread.id, promise);
     void promise
       .catch((reason: unknown) => {
-        if (controller.signal.aborted || detailRequestRef.current !== requestId) return;
+        if (detailRequestRef.current !== requestId) return;
+        if (timedOut) {
+          const staleEntry = threadCacheRef.current.get(thread.id);
+          if (staleEntry) {
+            detailRef.current = staleEntry.thread;
+            setDetail(staleEntry.thread);
+            setHistoryCursor(staleEntry.historyCursor);
+            setError("刷新超时，正在显示稍早的内容");
+          } else {
+            setDetail(null);
+            setHistoryCursor(null);
+            setError("加载超时，请重新点击会话重试");
+          }
+          return;
+        }
+        if (controller.signal.aborted) return; // 已被新选择取代
         const staleEntry = threadCacheRef.current.get(thread.id);
         if (staleEntry) {
           // 刷新失败：继续使用过期缓存，仅提示错误
@@ -461,10 +483,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
           setDetail(staleEntry.thread);
           setHistoryCursor(staleEntry.historyCursor);
           setError(errorMessage(reason));
-        } else if (reason instanceof DOMException && reason.name === "TimeoutError") {
-          setDetail(null);
-          setHistoryCursor(null);
-          setError("加载超时，请重新点击会话重试");
         } else {
           setDetail(null);
           setHistoryCursor(null);
@@ -472,6 +490,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         }
       })
       .finally(() => {
+        window.clearTimeout(timeoutTimer);
         inflightRef.current.delete(thread.id);
         if (detailRequestRef.current === requestId) setDetailLoading(false);
       });
@@ -765,7 +784,7 @@ function useActivityRefresh(api: ApiClient, auth: AuthState, onAuthChange: (valu
 }
 
 function mutateThreadFromEvent(thread: Thread, message: { method?: string; params?: Record<string, unknown> }): Thread {
-  const next = structuredClone(thread);
+  const next = cloneThread(thread);
   const params = message.params ?? {};
   const turnId = typeof params.turnId === "string" ? params.turnId : isRecord(params.turn) && typeof params.turn.id === "string" ? params.turn.id : null;
   if (message.method === "turn/started" && isRecord(params.turn)) {

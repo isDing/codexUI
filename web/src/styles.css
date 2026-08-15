@@ -43,6 +43,21 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
   background: #f3f5f3;
 }
 
+.crash-screen {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  text-align: center;
+  background: #f3f5f3;
+}
+.crash-screen h2 { margin: 6px 0 0; color: var(--ink); font-size: 16px; }
+.crash-screen p { max-width: 420px; margin: 0 0 8px; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+.crash-screen .primary-button { display: inline-flex; align-items: center; gap: 7px; }
+
 .brand-mark {
   display: grid;
   place-items: center;

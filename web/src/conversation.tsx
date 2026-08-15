@@ -101,7 +101,7 @@ export function Conversation({
     if (!scroller) return;
     const previous = scrollStateRef.current;
     const firstTurnId = thread.turns[0]?.id ?? "";
-    const lastTurnId = thread.turns.at(-1)?.id ?? "";
+    const lastTurnId = thread.turns[thread.turns.length - 1]?.id ?? "";
     const prepended =
       previous.threadId === thread.id &&
       Boolean(previous.firstTurnId) &&

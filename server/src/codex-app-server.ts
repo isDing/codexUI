@@ -18,6 +18,8 @@ export class CodexAppServer extends EventEmitter {
   private stopped = false;
   private restartTimer: NodeJS.Timeout | null = null;
   private restartDelayMs = 1_000;
+  private restartPromise: Promise<void> | null = null;
+  private lifecycleVersion = 0;
 
   constructor(private readonly config: AppConfig) {
     super();
@@ -29,6 +31,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async request<T = unknown>(method: string, params: JsonObject = {}, timeoutMs = 30_000): Promise<T> {
+    if (this.restartPromise) await this.restartPromise;
     await this.ensureReady();
     return this.sendRequest<T>(method, params, timeoutMs);
   }
@@ -37,27 +40,53 @@ export class CodexAppServer extends EventEmitter {
     this.write({ id, result });
   }
 
-  respondError(id: number | string, code: number, message: string): void {
-    this.write({ id, error: { code, message } });
+  async stop(): Promise<void> {
+    this.lifecycleVersion += 1;
+    this.stopped = true;
+    this.clearRestartTimer();
+    await this.terminate(new Error("Codex app-server stopped"));
   }
 
-  async stop(): Promise<void> {
-    this.stopped = true;
-    if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.restartTimer = null;
+  async restart(delayMs = 0): Promise<void> {
+    if (this.restartPromise) return this.restartPromise;
+    const version = ++this.lifecycleVersion;
+    const operation = (async () => {
+      this.stopped = true;
+      this.clearRestartTimer();
+      await this.terminate(new Error("Codex app-server restarting"));
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (version !== this.lifecycleVersion) return;
+      this.stopped = false;
+      await this.ensureReady();
+    })();
+    this.restartPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.restartPromise === operation) this.restartPromise = null;
+    }
+  }
+
+  private async terminate(error: Error): Promise<void> {
     const current = this.process;
     this.process = null;
     this.readyPromise = null;
+    this.rejectPending(error);
     if (current && current.exitCode === null && current.signalCode === null) {
       const exited = new Promise<void>((resolve) => current.once("exit", () => resolve()));
       current.kill("SIGTERM");
       await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
       if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
     }
-    this.rejectPending(new Error("Codex app-server stopped"));
+  }
+
+  private clearRestartTimer(): void {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
   }
 
   private ensureReady(): Promise<void> {
+    if (this.stopped) return Promise.reject(new Error("Codex app-server is stopped"));
     if (!this.readyPromise) this.readyPromise = this.launch();
     return this.readyPromise;
   }
@@ -82,9 +111,9 @@ export class CodexAppServer extends EventEmitter {
       if (line.trim()) this.emit("diagnostic", line.trim());
     });
 
-    child.on("error", (error) => this.handleExit(error));
+    child.on("error", (error) => this.handleExit(child, error));
     child.on("exit", (code, signal) => {
-      this.handleExit(new Error(`Codex app-server exited (${code ?? signal ?? "unknown"})`));
+      this.handleExit(child, new Error(`Codex app-server exited (${code ?? signal ?? "unknown"})`));
     });
 
     try {
@@ -97,7 +126,7 @@ export class CodexAppServer extends EventEmitter {
       // 否则 rejected 的 readyPromise 会让后续所有请求永久失败。
       const message = error instanceof Error ? error : new Error(String(error));
       if (!child.killed && child.exitCode === null) child.kill("SIGTERM");
-      this.handleExit(message);
+      this.handleExit(child, message);
       throw message;
     }
     this.write({ method: "initialized", params: {} });
@@ -158,8 +187,9 @@ export class CodexAppServer extends EventEmitter {
     if (message.method) this.emit("notification", message);
   }
 
-  private handleExit(error: Error): void {
-    if (!this.process && this.readyPromise === null) return;
+  private handleExit(child: ChildProcessWithoutNullStreams, error: Error): void {
+    // 旧进程退出时不能影响已经接管的新进程。
+    if (this.process !== child) return;
     this.process = null;
     this.readyPromise = null;
     this.rejectPending(error);

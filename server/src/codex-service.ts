@@ -29,7 +29,6 @@ const SOURCE_KINDS = [
 const INITIAL_HISTORY_PAGE_SIZE = 2;
 const HISTORY_PAGE_SIZE = 4;
 
-const rpcResult = <T>(value: unknown): T => value as T;
 const requestKey = (id: number | string): string => Buffer.from(String(id)).toString("base64url");
 
 type RuntimeSettings = JsonObject & {
@@ -222,7 +221,7 @@ export class CodexService extends EventEmitter {
       }),
       this.readThreadHistory(threadId, null, INITIAL_HISTORY_PAGE_SIZE),
     ]);
-    const metadata = rpcResult<{ thread: CodexThread }>(result).thread;
+    const metadata = result.thread;
     const archived = this.threads.get(metadata.id)?.archived ?? false;
     const thread = { ...metadata, archived, turns: history.turns };
     this.threads.set(metadata.id, { ...metadata, archived, turns: [] });
@@ -267,7 +266,7 @@ export class CodexService extends EventEmitter {
       "thread/start",
       params,
     );
-    const value = rpcResult<{ thread: CodexThread; model: string; reasoningEffort: string | null }>(result);
+    const value = result;
     const preferences: ThreadPreferences = {
       model: input.model ?? value.model,
       effort: input.effort ?? value.reasoningEffort,
@@ -325,7 +324,7 @@ export class CodexService extends EventEmitter {
     }
     this.db.setPreferences(threadId, preferences);
     this.db.markRead(threadId);
-    const result = await this.rpc.request("turn/start", {
+    const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
       threadId,
       input: [{ type: "text", text: input.text }],
       model: model ?? undefined,
@@ -343,7 +342,7 @@ export class CodexService extends EventEmitter {
     });
     this.pendingThreads.delete(threadId);
     this.pendingSince.delete(threadId);
-    const started = rpcResult<{ turn?: { id?: string } }>(result);
+    const started = result;
     if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
     this.lastActivityAt = Date.now();
     this.recycleArmed = true;
@@ -374,7 +373,7 @@ export class CodexService extends EventEmitter {
     const preferences: ThreadPreferences = { model, effort, fullAccess: input.fullAccess };
     this.db.setPreferences(threadId, preferences);
     this.db.markRead(threadId);
-    const result = await this.rpc.request("turn/start", {
+    const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
       threadId,
       input: [{ type: "text", text: input.text }],
       model: model ?? undefined,
@@ -390,7 +389,7 @@ export class CodexService extends EventEmitter {
             excludeSlashTmp: false,
         },
     });
-    const started = rpcResult<{ turn?: { id?: string } }>(result);
+    const started = result;
     if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
     this.lastActivityAt = Date.now();
     this.recycleArmed = true;
@@ -516,10 +515,8 @@ export class CodexService extends EventEmitter {
     this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
   }
 
-  // codex 的会话写锁（thread-writer-locks/<id>.lock 文件锁）会一直持有到
-  // app-server 卸载该会话（30 分钟无订阅无活动）或进程退出。为让服务器上的
-  // codex CLI 能在网页任务结束后立即 resume，任务完成 5 秒后主动回收子进程
-  // 释放全部写锁，并立即拉起干净的新进程（状态指示器不闪烁）。
+  // codex 的会话写锁会一直持有到 app-server 卸载会话或进程退出。
+  // 任务完成后主动重启子进程，释放写锁并让服务器上的 codex CLI 立即 resume。
   private maybeRecycle(): void {
     if (!this.recycleArmed || this.recycling || !this.connected || this.polling) return;
     const hasActiveTurn = [...this.threads.values()].some((thread) => thread.status.type === "active");
@@ -528,21 +525,12 @@ export class CodexService extends EventEmitter {
     this.recycling = true;
     // 每次空闲期只回收一次；有新活动后重新武装
     this.recycleArmed = false;
-    void (async () => {
-      try {
-        await this.rpc.stop();
-      } catch (error) {
-        console.warn("Codex recycle stop failed:", error);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-      try {
-        await this.rpc.start();
-      } catch (error) {
-        console.warn("Codex recycle restart failed:", error);
-      } finally {
+    void this.rpc
+      .restart(1_500)
+      .catch((error) => console.warn("Codex recycle restart failed:", error))
+      .finally(() => {
         this.recycling = false;
-      }
-    })();
+      });
   }
 
   private async refreshModels(): Promise<void> {

@@ -50,6 +50,10 @@ const commandSchema = z.object({
   command: z.enum(["rename", "archive", "unarchive", "compact", "goal", "steer"]),
   args: z.string().trim().max(2_000).optional(),
 });
+const LOGIN_ATTEMPT_LIMIT = 8;
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60_000;
+const LOGIN_ATTEMPT_BUCKET_LIMIT = 4_096;
+const LOGIN_ATTEMPT_PRUNE_INTERVAL_MS = 60_000;
 
 const jsonError = (response: Response, status: number, error: unknown): void => {
   const message = error instanceof Error ? error.message : "请求失败";
@@ -62,7 +66,8 @@ const touch = (request: Request, db: AppDatabase): void => {
 
 export const createApp = (config: AppConfig, db: AppDatabase, service: CodexService): Express => {
   const app = express();
-  if (config.trustProxy) app.set("trust proxy", true);
+  // 生产拓扑固定为一层 Nginx；不能信任客户端提供的更早代理地址。
+  if (config.trustProxy) app.set("trust proxy", 1);
   app.disable("x-powered-by");
   app.use(
     helmet({
@@ -125,18 +130,32 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
 
   const auth = requireAuth(db, config);
   const attempts = new Map<string, { count: number; resetAt: number }>();
+  let nextAttemptsPruneAt = 0;
+  const pruneAttempts = (now: number): void => {
+    if (now < nextAttemptsPruneAt && attempts.size < LOGIN_ATTEMPT_BUCKET_LIMIT) return;
+    for (const [address, attempt] of attempts) {
+      if (attempt.resetAt <= now) attempts.delete(address);
+    }
+    while (attempts.size >= LOGIN_ATTEMPT_BUCKET_LIMIT) {
+      const oldest = attempts.keys().next().value;
+      if (oldest === undefined) break;
+      attempts.delete(oldest);
+    }
+    nextAttemptsPruneAt = now + LOGIN_ATTEMPT_PRUNE_INTERVAL_MS;
+  };
   app.post("/api/auth/login", async (request, response) => {
     const now = Date.now();
+    pruneAttempts(now);
     const address = request.ip || "unknown";
     const attempt = attempts.get(address);
-    if (attempt && attempt.resetAt > now && attempt.count >= 8) {
+    if (attempt && attempt.resetAt > now && attempt.count >= LOGIN_ATTEMPT_LIMIT) {
       response.status(429).json({ error: "登录尝试过于频繁，请稍后再试" });
       return;
     }
     if (attempt && attempt.resetAt <= now) attempts.delete(address);
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success || parsed.data.username !== config.adminUser || !(await verifyPassword(parsed.data.password, config.adminPasswordHash))) {
-      const current = attempts.get(address) ?? { count: 0, resetAt: now + 15 * 60_000 };
+      const current = attempts.get(address) ?? { count: 0, resetAt: now + LOGIN_ATTEMPT_WINDOW_MS };
       current.count += 1;
       attempts.set(address, current);
       response.status(401).json({ error: "用户名或密码不正确" });

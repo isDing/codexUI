@@ -62,7 +62,6 @@ type ThreadCacheEntry = {
   thread: Thread;
   preferences: Preferences;
   historyCursor: string | null;
-  loadedAt: number;
 };
 
 const readSelection = (key: string): string | null => {
@@ -396,7 +395,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         thread: value.thread,
         preferences: value.preferences,
         historyCursor: value.nextCursor,
-        loadedAt: Date.now(),
       });
       pruneThreadCache();
       detailRef.current = value.thread;
@@ -588,7 +586,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       thread: result.thread,
       preferences: result.preferences,
       historyCursor: null,
-      loadedAt: Date.now(),
     });
     pruneThreadCache();
     setSnapshot((current) => ({

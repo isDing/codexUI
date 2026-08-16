@@ -83,4 +83,23 @@ describe("authentication API", () => {
       .send({ username: "admin", password: "valid test password" })
       .expect(403);
   });
+
+  it("does not let a client bypass login throttling with a forged proxy chain", async () => {
+    config.trustProxy = true;
+    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    for (let index = 0; index < 8; index += 1) {
+      await request(app)
+        .post("/api/auth/login")
+        .set("origin", config.allowedOrigin)
+        .set("x-forwarded-for", `203.0.113.${index}, 198.51.100.42`)
+        .send({ username: "unknown", password: "wrong" })
+        .expect(401);
+    }
+    await request(app)
+      .post("/api/auth/login")
+      .set("origin", config.allowedOrigin)
+      .set("x-forwarded-for", "203.0.113.99, 198.51.100.42")
+      .send({ username: "unknown", password: "wrong" })
+      .expect(429);
+  });
 });

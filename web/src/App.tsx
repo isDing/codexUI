@@ -1,13 +1,14 @@
 import {
   Code2,
   CircleAlert,
+  ChevronDown,
+  ChevronRight,
   Folder,
   FolderPlus,
   Folders,
   LoaderCircle,
   LockKeyhole,
   LogOut,
-  MessagesSquare,
   Plus,
   Search,
   Server,
@@ -53,6 +54,7 @@ const APP_VERSION = webPackage.version;
 const SELECTION_KEYS = {
   workspace: "codex-ui.selected-workspace",
   thread: "codex-ui.selected-thread",
+  sidebar: "codex-ui.sidebar-collapsed",
 } as const;
 
 const THREAD_CACHE_MAX = 25;
@@ -196,6 +198,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>(() => readSelection(SELECTION_KEYS.workspace) ?? "");
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(() => readSelection(SELECTION_KEYS.thread));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readSelection(SELECTION_KEYS.sidebar) === "true");
   const [detail, setDetail] = useState<Thread | null>(null);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -203,7 +206,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
-  const [drawer, setDrawer] = useState<"workspaces" | "threads" | null>(null);
+  const [drawer, setDrawer] = useState<"workspace" | null>(null);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [approvalPanelOpen, setApprovalPanelOpen] = useState(false);
@@ -215,8 +218,9 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const autoHistoryRef = useRef(true);
   const detailRef = useRef<Thread | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const inflightRef = useRef<Map<string, Promise<void>>>(new Map());
   const threadCacheRef = useRef<Map<string, ThreadCacheEntry>>(new Map());
+  const authRef = useRef(auth);
+  authRef.current = auth;
 
   selectedRef.current = selectedThreadId;
 
@@ -228,6 +232,10 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     writeSelection(SELECTION_KEYS.thread, selectedThreadId);
   }, [selectedThreadId]);
 
+  useEffect(() => {
+    writeSelection(SELECTION_KEYS.sidebar, sidebarCollapsed ? "true" : null);
+  }, [sidebarCollapsed]);
+
   useEffect(
     () => () => {
       abortRef.current?.abort();
@@ -235,7 +243,13 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     [],
   );
 
-  useActivityRefresh(api, auth, onAuthChange);
+  const updateActivityExpiry = useCallback((expiresAt: number) => {
+    const current = authRef.current;
+    if (!current.authenticated) return;
+    onAuthChange({ ...current, expiresAt });
+  }, [onAuthChange]);
+
+  useActivityRefresh(api, auth, updateActivityExpiry, onAuthChange);
 
   // 安全发送 viewing 消息：连接未就绪时跳过——open 事件会用 selectedRef 补发当前选择，
   // 对 CONNECTING/CLOSED 状态直接 send 会抛 InvalidStateError 并触发错误边界
@@ -333,32 +347,40 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         if (selectedRef.current) sendViewing(selectedRef.current);
       });
       socket.addEventListener("message", (event) => {
-        const message = JSON.parse(event.data) as { type: string; payload?: unknown };
-        if (message.type === "snapshot") updateSnapshot(message.payload as Snapshot);
+        let message: { type: string; payload?: unknown };
+        try {
+          message = JSON.parse(event.data) as { type: string; payload?: unknown };
+        } catch {
+          return;
+        }
+        if (message.type === "snapshot" && isRecord(message.payload)) updateSnapshot(message.payload as Snapshot);
         if (message.type === "connection") updateSnapshot({ connected: Boolean((message.payload as { connected?: boolean })?.connected) });
         if (message.type === "threads.changed") {
-          const payload = message.payload as { threads?: Thread[]; thread?: Thread };
-          if (payload.threads) updateSnapshot({ threads: payload.threads });
-          if (payload.thread) {
+          const payload = isRecord(message.payload) ? message.payload as { threads?: unknown; thread?: unknown } : {};
+          if (Array.isArray(payload.threads)) updateSnapshot({ threads: payload.threads as Thread[] });
+          if (isRecord(payload.thread) && typeof payload.thread.id === "string") {
             setSnapshot((current) => ({
               ...current,
-              threads: [payload.thread!, ...current.threads.filter((thread) => thread.id !== payload.thread!.id)],
+              threads: [payload.thread as Thread, ...current.threads.filter((thread) => thread.id !== (payload.thread as Thread).id)],
             }));
           }
         }
         if (message.type === "workspaces.changed") {
-          updateSnapshot({ workspaces: (message.payload as { workspaces: Workspace[] }).workspaces });
+          const workspaces = isRecord(message.payload) ? message.payload.workspaces : undefined;
+          if (Array.isArray(workspaces)) updateSnapshot({ workspaces: workspaces as Workspace[] });
         }
         if (message.type === "unread.changed") {
-          updateSnapshot({ unreadThreadIds: (message.payload as { unreadThreadIds: string[] }).unreadThreadIds });
+          const unreadThreadIds = isRecord(message.payload) ? message.payload.unreadThreadIds : undefined;
+          if (Array.isArray(unreadThreadIds)) updateSnapshot({ unreadThreadIds: unreadThreadIds.filter((id): id is string => typeof id === "string") });
         }
         if (message.type === "requests.changed") {
-          updateSnapshot({ pendingRequests: (message.payload as { pendingRequests: PendingRequest[] }).pendingRequests });
+          const pendingRequests = isRecord(message.payload) ? message.payload.pendingRequests : undefined;
+          if (Array.isArray(pendingRequests)) updateSnapshot({ pendingRequests: pendingRequests as PendingRequest[] });
         }
         if (message.type === "thread.settings.changed") {
-          const payload = message.payload as { threadId?: string; preferences?: Preferences };
-          if (payload.threadId === selectedRef.current && payload.preferences) {
-            setPreferences(payload.preferences);
+          const payload = isRecord(message.payload) ? message.payload : {};
+          if (payload.threadId === selectedRef.current && isRecord(payload.preferences)) {
+            setPreferences(payload.preferences as Preferences);
           }
         }
         if (message.type === "codex.event") applyCodexEvent(message.payload as { method?: string; params?: Record<string, unknown> });
@@ -417,7 +439,9 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     sendViewing(thread.id);
 
     const cached = threadCacheRef.current.get(thread.id);
-    const stale = cached !== undefined && cached.thread.updatedAt !== thread.updatedAt;
+    const stale = cached !== undefined && (
+      cached.thread.updatedAt !== thread.updatedAt || cached.thread.status.type !== thread.status.type
+    );
 
     if (cached && !stale) {
       // 缓存命中：立即渲染，不出现整屏加载
@@ -455,20 +479,16 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     }
 
     const load = async (): Promise<void> => {
-      const [value, unread] = await Promise.all([
-        api.readThread(thread.id, { signal }),
-        api.markRead(thread.id, { signal }),
-      ]);
+      const value = await api.readThread(thread.id, { signal });
       if (detailRequestRef.current !== requestId) return;
       applyThreadLoad(thread.id, value);
-      updateSnapshot({ unreadThreadIds: unread.unreadThreadIds });
       setDetailLoading(false);
+      void api.markRead(thread.id, { signal })
+        .then(({ unreadThreadIds }) => updateSnapshot({ unreadThreadIds }))
+        .catch(() => undefined);
     };
 
-    const existing = inflightRef.current.get(thread.id);
-    const promise = existing ?? load();
-    inflightRef.current.set(thread.id, promise);
-    void promise
+    void load()
       .catch((reason: unknown) => {
         if (detailRequestRef.current !== requestId) return;
         if (timedOut) {
@@ -501,7 +521,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
       })
       .finally(() => {
         window.clearTimeout(timeoutTimer);
-        inflightRef.current.delete(thread.id);
         if (detailRequestRef.current === requestId) setDetailLoading(false);
       });
   };
@@ -559,26 +578,51 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     fetchOlderHistory();
   }, [detail, detailLoading, fetchOlderHistory, historyCursor, historyLoading]);
 
-  const workspaceThreads = useMemo(
-    () =>
-      snapshot.threads.filter(
-        (thread) =>
-          thread.cwd === selectedWorkspace &&
-          (!search || threadTitle(thread).toLocaleLowerCase().includes(search.toLocaleLowerCase())),
-      ),
-    [search, selectedWorkspace, snapshot.threads],
-  );
+  const filteredThreads = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return snapshot.threads.filter((thread) => !query || threadTitle(thread).toLocaleLowerCase().includes(query));
+  }, [search, snapshot.threads]);
+
+  const threadsByWorkspace = useMemo(() => {
+    const grouped = new Map<string, Thread[]>();
+    for (const thread of filteredThreads) {
+      const current = grouped.get(thread.cwd) ?? [];
+      current.push(thread);
+      grouped.set(thread.cwd, current);
+    }
+    return grouped;
+  }, [filteredThreads]);
 
   const selectedThread = snapshot.threads.find((thread) => thread.id === selectedThreadId) ?? detail;
   const threadPending = snapshot.pendingRequests.filter((request) => request.params.threadId === selectedThread?.id);
   const otherPending = snapshot.pendingRequests.filter((request) => request.params.threadId !== selectedThread?.id);
 
+  const selectWorkspace = (workspacePath: string) => {
+    setSelectedWorkspace(workspacePath);
+    setDrawer("workspace");
+    if (!selectedThread || selectedThread.cwd === workspacePath) return;
+    detailRequestRef.current += 1;
+    abortRef.current?.abort();
+    setSelectedThreadId(null);
+    detailRef.current = null;
+    setDetail(null);
+    setHistoryCursor(null);
+    setHistoryLoading(false);
+    setDetailLoading(false);
+  };
+
   useEffect(() => {
     if (approvalPanelOpen && otherPending.length === 0) setApprovalPanelOpen(false);
   }, [approvalPanelOpen, otherPending.length]);
 
-  const createThread = async (cwd: string, value: Preferences) => {
-    const result = await api.createThread({ cwd, ...value });
+  const createThread = async (cwd: string) => {
+    const defaultModel = snapshot.models.find((model) => model.isDefault) ?? snapshot.models[0];
+    const result = await api.createThread({
+      cwd,
+      model: defaultModel?.model ?? null,
+      effort: defaultModel?.defaultReasoningEffort ?? null,
+      fullAccess: false,
+    });
     detailRequestRef.current += 1;
     abortRef.current?.abort();
     autoHistoryRef.current = false;
@@ -609,7 +653,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     updateSnapshot({ workspaces: result.workspaces });
     setSelectedWorkspace(result.path);
     setWorkspaceDialogOpen(false);
-    setDrawer("threads");
+    setDrawer("workspace");
   };
 
   const appendStartedTurn = (threadId: string, turn: Turn) => {
@@ -650,7 +694,7 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     if (current && current.id === threadId) {
       // 服务端已回滚旧轮次。WS 事件可能已先行把新轮次追加进列表：
       // 按 id 精确移除旧轮次并去重新轮次，而不是依赖位置。
-      if (rolledBackId) SUPPRESSED_TURN_IDS.add(rolledBackId);
+      if (rolledBackId) suppressTurn(rolledBackId);
       const turns = [
         ...current.turns.filter((entry) => entry.id !== rolledBackId && entry.id !== turn.id),
         turn,
@@ -676,15 +720,14 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   };
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <header className="topbar">
         <div className="topbar-brand">
           <div className="brand-mark small"><Code2 size={19} /></div>
           <strong>Codex UI</strong><span className="app-version">v{APP_VERSION}</span>
         </div>
         <div className="mobile-nav-actions">
-          <IconButton title="工作区" onClick={() => setDrawer(drawer === "workspaces" ? null : "workspaces")}><Folders size={19} /></IconButton>
-          <IconButton title="会话" onClick={() => setDrawer(drawer === "threads" ? null : "threads")}><MessagesSquare size={19} /></IconButton>
+          <IconButton title="工作区与会话" onClick={() => setDrawer(drawer === "workspace" ? null : "workspace")}><Folders size={19} /></IconButton>
         </div>
         <div className="topbar-actions">
           <span className={`connection-pill ${snapshot.connected ? "online" : "offline"}`}>
@@ -703,33 +746,14 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         </div>
       </header>
 
-      <aside className={`workspace-sidebar ${drawer === "workspaces" ? "drawer-open" : ""}`}>
-        <SidebarHeading icon={<Folders size={17} />} title="工作区" onClose={() => setDrawer(null)} />
-        <nav className="workspace-list" aria-label="工作区">
-          {snapshot.workspaces.map((workspace) => (
-            <button
-              key={workspace.path}
-              className={`workspace-row ${selectedWorkspace === workspace.path ? "selected" : ""}`}
-              onClick={() => {
-                setSelectedWorkspace(workspace.path);
-                setDrawer("threads");
-              }}
-            >
-              <Folder size={17} />
-              <span className="workspace-copy"><strong>{workspace.name}</strong><small>{workspace.path}</small></span>
-              <span className="count-badge">{workspace.threadCount}</span>
-              {workspace.activeCount > 0 && <span className="active-pip" title="有任务进行中" />}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <span className="sidebar-footer-copy"><Server size={15} />{snapshot.workspaces.length} 个工作区</span>
-          <IconButton title="新增工作区" onClick={() => setWorkspaceDialogOpen(true)}><FolderPlus size={17} /></IconButton>
-        </div>
-      </aside>
-
-      <aside className={`thread-sidebar ${drawer === "threads" ? "drawer-open" : ""}`}>
-        <SidebarHeading icon={<MessagesSquare size={17} />} title="会话" onClose={() => setDrawer(null)} />
+      <aside className={`workspace-sidebar ${sidebarCollapsed ? "collapsed" : ""} ${drawer === "workspace" ? "drawer-open" : ""}`}>
+        <SidebarHeading
+          icon={<Folders size={17} />}
+          title="工作区与会话"
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed((current) => !current)}
+          onClose={() => setDrawer(null)}
+        />
         <div className="thread-tools">
           <button className="new-thread-button" onClick={() => setNewThreadOpen(true)} disabled={!selectedWorkspace}>
             <Plus size={17} />新建会话
@@ -739,18 +763,46 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索会话" />
           </label>
         </div>
-        <nav className="thread-list" aria-label="会话">
-          {workspaceThreads.map((thread) => (
-            <ThreadRow
-              key={thread.id}
-              thread={thread}
-              selected={thread.id === selectedThreadId}
-              unread={snapshot.unreadThreadIds.includes(thread.id)}
-              onSelect={() => void selectThread(thread)}
-            />
-          ))}
-          {!loading && workspaceThreads.length === 0 && <div className="empty-sidebar">暂无会话</div>}
+        <nav className="workspace-list" aria-label="工作区与会话">
+          {snapshot.workspaces.map((workspace) => {
+            const threads = threadsByWorkspace.get(workspace.path) ?? [];
+            const expanded = selectedWorkspace === workspace.path || search.trim().length > 0;
+            if (search.trim() && threads.length === 0) return null;
+            return (
+              <section className={`workspace-group ${expanded ? "expanded" : ""}`} key={workspace.path}>
+                <button
+                  className={`workspace-row ${selectedWorkspace === workspace.path ? "selected" : ""}`}
+                  onClick={() => selectWorkspace(workspace.path)}
+                >
+                  {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  <Folder size={17} />
+                  <span className="workspace-copy"><strong>{workspace.name}</strong><small>{workspace.path}</small></span>
+                  <span className="count-badge">{workspace.threadCount}</span>
+                  {workspace.activeCount > 0 && <span className="active-pip" title="有任务进行中" />}
+                </button>
+                {expanded && (
+                  <div className="workspace-threads" aria-label={`${workspace.name} 下的会话`}>
+                    {threads.map((thread) => (
+                      <ThreadRow
+                        key={thread.id}
+                        thread={thread}
+                        selected={thread.id === selectedThreadId}
+                        unread={snapshot.unreadThreadIds.includes(thread.id)}
+                        onSelect={() => void selectThread(thread)}
+                      />
+                    ))}
+                    {!loading && threads.length === 0 && <div className="empty-sidebar">暂无会话</div>}
+                  </div>
+                )}
+              </section>
+            );
+          })}
+          {!loading && snapshot.workspaces.length === 0 && <div className="empty-sidebar">暂无工作区</div>}
         </nav>
+        <div className="sidebar-footer">
+          <span className="sidebar-footer-copy"><Server size={15} />{snapshot.workspaces.length} 个工作区</span>
+          <IconButton title="新增工作区" onClick={() => setWorkspaceDialogOpen(true)}><FolderPlus size={17} /></IconButton>
+        </div>
       </aside>
 
       {(drawer || newThreadOpen || workspaceDialogOpen || approvalPanelOpen) && (
@@ -789,7 +841,6 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         <NewThreadDialog
           workspaces={snapshot.workspaces}
           initialWorkspace={selectedWorkspace}
-          models={snapshot.models}
           onClose={() => setNewThreadOpen(false)}
           onCreate={createThread}
         />
@@ -823,14 +874,19 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   );
 }
 
-function useActivityRefresh(api: ApiClient, auth: AuthState, onAuthChange: (value: AuthState) => void) {
+function useActivityRefresh(
+  api: ApiClient,
+  auth: AuthState,
+  onActivityExpiry: (expiresAt: number) => void,
+  onAuthChange: (value: AuthState) => void,
+) {
   useEffect(() => {
     let lastSent = 0;
     const onActivity = () => {
       const now = Date.now();
       if (now - lastSent < 60_000) return;
       lastSent = now;
-      void api.activity().then(({ expiresAt }) => onAuthChange({ ...auth, expiresAt })).catch(() => undefined);
+      void api.activity().then(({ expiresAt }) => onActivityExpiry(expiresAt)).catch(() => undefined);
     };
     const events: Array<keyof WindowEventMap> = ["pointerdown", "keydown", "touchstart"];
     events.forEach((event) => window.addEventListener(event, onActivity, { passive: true }));
@@ -841,12 +897,21 @@ function useActivityRefresh(api: ApiClient, auth: AuthState, onAuthChange: (valu
       events.forEach((event) => window.removeEventListener(event, onActivity));
       clearInterval(expiry);
     };
-  }, [api, auth, onAuthChange]);
+  }, [api, auth, onActivityExpiry, onAuthChange]);
 }
 
 // 被回滚（修改重发）的轮次 id：codex 回滚后会补发这些轮次的完成事件，
 // 忽略它们以防旧对话内容被重新追加到界面
 const SUPPRESSED_TURN_IDS = new Set<string>();
+
+const suppressTurn = (turnId: string): void => {
+  SUPPRESSED_TURN_IDS.add(turnId);
+  while (SUPPRESSED_TURN_IDS.size > 1_000) {
+    const oldest = SUPPRESSED_TURN_IDS.values().next().value;
+    if (oldest === undefined) break;
+    SUPPRESSED_TURN_IDS.delete(oldest);
+  }
+};
 
 function mutateThreadFromEvent(thread: Thread, message: { method?: string; params?: Record<string, unknown> }): Thread {
   const next = cloneThread(thread);

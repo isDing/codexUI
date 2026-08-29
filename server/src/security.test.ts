@@ -1,9 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppDatabase } from "./database.js";
-import { CodexService, preferencesFromPersistedSettings, preferencesFromRuntimeSettings } from "./codex-service.js";
+import { loadConfig } from "./config.js";
+import {
+  CodexService,
+  preferencesByTurnFromPersistedLines,
+  preferencesFromPersistedSettings,
+  preferencesFromRuntimeSettings,
+} from "./codex-service.js";
 import type { AppConfig } from "./config.js";
 import type { CodexThread, CodexTurn } from "./types.js";
 import { hashPassword, verifyPassword } from "./security.js";
@@ -11,6 +17,27 @@ import { hashPassword, verifyPassword } from "./security.js";
 const tempDirs: string[] = [];
 afterEach(() => {
   for (const directory of tempDirs.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
+
+describe("runtime configuration", () => {
+  const validHash = `scrypt$salt$${Buffer.alloc(64).toString("base64url")}`;
+
+  it("uses insecure cookies only for non-production development by default", () => {
+    vi.stubEnv("ADMIN_PASSWORD_HASH", validHash);
+    vi.stubEnv("SESSION_SECRET", "a-session-secret-with-at-least-32-characters");
+    vi.stubEnv("NODE_ENV", "development");
+    expect(loadConfig().secureCookies).toBe(false);
+    vi.stubEnv("NODE_ENV", "production");
+    expect(loadConfig().secureCookies).toBe(true);
+  });
+
+  it("rejects invalid numeric settings before the server starts", () => {
+    vi.stubEnv("ADMIN_PASSWORD_HASH", validHash);
+    vi.stubEnv("SESSION_SECRET", "a-session-secret-with-at-least-32-characters");
+    vi.stubEnv("PORT", "not-a-port");
+    expect(() => loadConfig()).toThrow("PORT must be an integer");
+  });
 });
 
 describe("password hashing", () => {
@@ -18,6 +45,11 @@ describe("password hashing", () => {
     const hash = await hashPassword("a sufficiently long password");
     await expect(verifyPassword("a sufficiently long password", hash)).resolves.toBe(true);
     await expect(verifyPassword("a different password", hash)).resolves.toBe(false);
+  });
+
+  it("rejects malformed hashes without throwing", async () => {
+    await expect(verifyPassword("any password", "not-a-password-hash")).resolves.toBe(false);
+    await expect(verifyPassword("any password", "scrypt$salt$Zm9v")).resolves.toBe(false);
   });
 });
 
@@ -57,7 +89,7 @@ describe("session and thread state", () => {
 });
 
 describe("thread settings restoration", () => {
-  it("maps the app-server resume settings to the visible session controls", () => {
+  it("maps the app-server resume settings to visible answer metadata", () => {
     expect(
       preferencesFromRuntimeSettings({
         model: "gpt-5.6-sol",
@@ -75,6 +107,12 @@ describe("thread settings restoration", () => {
         activePermissionProfile: { id: ":danger-full-access" },
       }),
     ).toEqual({ model: "gpt-5.6-sol", effort: "high", fullAccess: true });
+    expect(
+      preferencesFromRuntimeSettings(
+        { activePermissionProfile: { id: ":workspace" }, permission_profile: { type: "managed" } },
+        { model: "gpt-5.6-sol", effort: "high", fullAccess: true },
+      ),
+    ).toEqual({ model: "gpt-5.6-sol", effort: "high", fullAccess: false });
   });
 
   it("uses persisted rollout settings when an active writer cannot be resumed", () => {
@@ -97,6 +135,19 @@ describe("thread settings restoration", () => {
       }),
     ).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", fullAccess: true });
   });
+
+  it("associates persisted settings with the turn that used them", () => {
+    const lines = [
+      JSON.stringify({ payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-a", reasoning_effort: "low", permission_profile: { type: "managed" } } } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-a" } }),
+      JSON.stringify({ payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-b", reasoning_effort: "xhigh", permission_profile: { type: "disabled" } } } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-b" } }),
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-b", model: "gpt-b", effort: "ultra", approval_policy: "never", sandbox_policy: { type: "dangerFullAccess" } } }),
+    ];
+    const result = preferencesByTurnFromPersistedLines(lines);
+    expect(result.get("turn-a")).toEqual({ model: "gpt-a", effort: "low", fullAccess: false });
+    expect(result.get("turn-b")).toEqual({ model: "gpt-b", effort: "ultra", fullAccess: true });
+  });
 });
 
 describe("thread history pagination", () => {
@@ -108,8 +159,12 @@ describe("thread history pagination", () => {
     const rolloutPath = path.join(directory, "rollout.jsonl");
     fs.writeFileSync(rolloutPath, [
       JSON.stringify({ payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-old", reasoning_effort: "low" } } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-1" } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-2" } }),
       "malformed historical line",
       JSON.stringify({ payload: { type: "thread_settings_applied", thread_settings: { model: "gpt-latest", reasoning_effort: "xhigh", approval_policy: "never", sandbox_mode: "danger-full-access" } } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-3" } }),
+      JSON.stringify({ payload: { type: "task_started", turn_id: "turn-4" } }),
     ].join("\n"));
     const config: AppConfig = {
       port: 0,
@@ -177,6 +232,10 @@ describe("thread history pagination", () => {
     expect(initial.thread.turns.map((entry) => entry.id)).toEqual(["turn-3", "turn-4"]);
     expect(initial.nextCursor).toBe("older-turns");
     expect(initial.preferences).toEqual({ model: "gpt-latest", effort: "xhigh", fullAccess: true });
+    expect(initial.thread.turns.map((entry) => entry.preferences)).toEqual([
+      { model: "gpt-latest", effort: "xhigh", fullAccess: true },
+      { model: "gpt-latest", effort: "xhigh", fullAccess: true },
+    ]);
     expect(calls.find((call) => call.method === "thread/read")?.params).toEqual({
       threadId: thread.id,
       includeTurns: false,
@@ -190,6 +249,10 @@ describe("thread history pagination", () => {
 
     const older = await service.readThreadHistory(thread.id, initial.nextCursor);
     expect(older.turns.map((entry) => entry.id)).toEqual(["turn-1", "turn-2"]);
+    expect(older.turns.map((entry) => entry.preferences)).toEqual([
+      { model: "gpt-old", effort: "low", fullAccess: false },
+      { model: "gpt-old", effort: "low", fullAccess: false },
+    ]);
     expect(older.nextCursor).toBeNull();
     expect(calls.at(-1)?.params).toMatchObject({ cursor: "older-turns", limit: 4 });
 
@@ -199,6 +262,38 @@ describe("thread history pagination", () => {
 });
 
 describe("new thread materialization", () => {
+  it("rejects symlinked workspaces that resolve outside configured roots", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-root-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-outside-"));
+    tempDirs.push(root, outside);
+    const link = path.join(root, "linked-project");
+    fs.symlinkSync(outside, link, "dir");
+    const db = new AppDatabase(root);
+    const config: AppConfig = {
+      port: 0,
+      host: "127.0.0.1",
+      nodeEnv: "test",
+      dataDir: root,
+      codexBin: "codex",
+      codexHome: undefined,
+      workspaceRoots: [root],
+      allowedOrigin: "http://codexui.test",
+      adminUser: "admin",
+      adminPasswordHash: "unused",
+      sessionSecret: "test-session-secret-with-enough-entropy",
+      sessionIdleMs: 4 * 60 * 60 * 1_000,
+      secureCookies: false,
+      trustProxy: false,
+      pollIntervalMs: 3_000,
+      appVersion: "test",
+    };
+    const service = new CodexService(config, db);
+    const validate = (service as unknown as { validateWorkspace: (candidate: string) => Promise<string> }).validateWorkspace.bind(service);
+    await expect(validate(link)).rejects.toThrow("工作区不在允许的目录中");
+    await service.stop();
+    db.close();
+  });
+
   it("starts the first turn without reading or resuming an unmaterialized thread", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-new-thread-"));
     tempDirs.push(directory);

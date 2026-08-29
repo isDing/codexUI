@@ -12,7 +12,7 @@ RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
 
-ARG CODEX_VERSION=0.147.0
+ARG CODEX_VERSION=0.150.1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl git openssh-client ripgrep \
   && npm install --global "@openai/codex@${CODEX_VERSION}" \

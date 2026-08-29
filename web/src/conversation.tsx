@@ -1,7 +1,6 @@
 import {
   Bot,
   Check,
-  ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
   ChevronsUp,
@@ -20,7 +19,7 @@ import {
   User,
   Wrench,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ApiClient } from "./api";
@@ -90,8 +89,6 @@ export function Conversation({
   const atBottomRef = useRef(true);
   const scrollStateRef = useRef({ threadId: "", firstTurnId: "", lastTurnId: "", height: 0 });
   const active = listThread.status.type === "active" || thread.status.type === "active";
-  const previousActiveRef = useRef(active);
-  const [processesOpen, setProcessesOpen] = useState(active);
   const [isMobileLayout, setIsMobileLayout] = useState(
     () => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 820px)").matches,
   );
@@ -130,24 +127,6 @@ export function Conversation({
     el.style.height = `${Math.min(Math.max(el.scrollHeight, 36), 150)}px`;
   }, [text, active]);
 
-  useEffect(() => {
-    if (active === previousActiveRef.current) return;
-    previousActiveRef.current = active;
-    setProcessesOpen(active);
-  }, [active]);
-
-  useLayoutEffect(() => {
-    const details = scrollRef.current?.querySelectorAll<HTMLDetailsElement>(
-      "details.reasoning-item, details.commentary-message, details.tool-item",
-    );
-    details?.forEach((detail) => {
-      // 纯过程内容的轮次始终展开，折叠开关只影响混排轮次
-      if (detail.hasAttribute("data-always-open")) return;
-      // 任务进行中：命令等过程项默认折叠，只有过程消息展开
-      detail.open = active ? false : processesOpen;
-    });
-  }, [active, processesOpen, thread.turns]);
-
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
@@ -185,7 +164,7 @@ export function Conversation({
     onError("");
     try {
       const result = await api.startTurn(thread.id, { text: requestText, ...preferences });
-      const turn = result.turn
+      const startedTurn = result.turn
         ? ensureUserMessage(result.turn, requestText)
         : {
             id: `local-${Date.now()}`,
@@ -196,6 +175,7 @@ export function Conversation({
             completedAt: null,
             durationMs: null,
           };
+      const turn = { ...startedTurn, preferences: { ...preferences } };
       onTurnStarted(thread.id, turn);
       setText("");
     } catch (reason) {
@@ -238,7 +218,7 @@ export function Conversation({
             model.id.toLowerCase().includes(query),
         );
         if (!match) {
-          onError("未找到匹配的模型，可用 /help 查看模型选择器");
+          onError("未找到匹配的模型，请检查模型名称");
           return;
         }
         onPreferencesChange({ ...preferences, model: match.model, effort: match.defaultReasoningEffort });
@@ -319,7 +299,7 @@ export function Conversation({
     const rolledBack = thread.turns[thread.turns.length - 1];
     try {
       const result = await api.retryTurn(thread.id, { text: requestText, ...preferences });
-      const turn = result.turn
+      const startedTurn = result.turn
         ? ensureUserMessage(result.turn, requestText)
         : {
             id: `local-${Date.now()}`,
@@ -330,6 +310,7 @@ export function Conversation({
             completedAt: null,
             durationMs: null,
           };
+      const turn = { ...startedTurn, preferences: { ...preferences } };
       onTurnRetried(thread.id, turn, rolledBack?.id);
       setText("");
       setEditing(false);
@@ -375,55 +356,11 @@ export function Conversation({
           <div className="conversation-state-icon">{active ? <LoaderCircle className="spin" size={18} /> : <MessageSquare size={18} />}</div>
           <div><h1>{thread.name?.trim() || thread.preview?.trim().split("\n")[0]?.slice(0, 68) || "未命名会话"}</h1><p>{thread.cwd}</p></div>
         </div>
-        <div className="session-controls">
-          <button
-            type="button"
-            className="process-toggle"
-            aria-label={processesOpen ? "收起过程" : "展开过程"}
-            aria-pressed={processesOpen}
-            title={processesOpen ? "收起全部思考、过程消息和工具调用" : "展开全部思考、过程消息和工具调用"}
-            onClick={() => setProcessesOpen((current) => !current)}
-          >
-            {processesOpen ? <ChevronsDownUp size={16} /> : <ChevronsUpDown size={16} />}
-            <span>{processesOpen ? "收起过程" : "展开过程"}</span>
-          </button>
-          <label title="选择模型">
-            <span>模型</span>
-            <select
-              value={preferences.model ?? selectedModel?.model ?? ""}
-              onChange={(event) => {
-                const model = modelFor(models, event.target.value);
-                onPreferencesChange({ ...preferences, model: event.target.value, effort: model?.defaultReasoningEffort ?? null });
-              }}
-            >
-              {models.map((model) => <option key={model.id} value={model.model} title={model.description}>{model.displayName}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-          <label title="选择思考强度">
-            <span>思考</span>
-            <select value={preferences.effort ?? ""} onChange={(event) => onPreferencesChange({ ...preferences, effort: event.target.value })}>
-              {efforts.map((entry) => <option key={entry.reasoningEffort} value={entry.reasoningEffort} title={entry.description}>{effortLabel(entry.reasoningEffort)}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-          <label className={`access-toggle ${preferences.fullAccess ? "enabled" : ""}`} title="允许 Codex 不受沙箱限制地执行任务">
-            <ShieldAlert size={16} />
-            <span>完全访问</span>
-            <input
-              type="checkbox"
-              checked={preferences.fullAccess}
-              onChange={(event) => onPreferencesChange({ ...preferences, fullAccess: event.target.checked })}
-            />
-            <i aria-hidden="true" />
-          </label>
-        </div>
       </header>
 
       <div
         className="conversation-scroll"
         ref={scrollRef}
-        data-processes-open={processesOpen ? "true" : "false"}
         onScroll={(event) => {
           const scroller = event.currentTarget;
           atBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 24;
@@ -443,8 +380,9 @@ export function Conversation({
               <TurnView
                 key={turn.id}
                 turn={turn}
-                processesOpen={processesOpen}
-                live={active}
+                live={turn.status === "inProgress"}
+                models={models}
+                preferences={preferences}
                 editable={!active && index === thread.turns.length - 1 && turn.status !== "inProgress"}
                 onEdit={startEdit}
               />
@@ -585,20 +523,27 @@ export function Conversation({
   );
 }
 
-function TurnView({ turn, processesOpen, editable, onEdit, live }: {
+function TurnView({ turn, editable, onEdit, live, models, preferences }: {
   turn: Turn;
-  processesOpen: boolean;
   editable: boolean;
   onEdit: (text: string) => void;
   live: boolean;
+  models: Model[];
+  preferences: Preferences;
 }) {
   const items = turn.items;
-  let lastUserIndex = -1;
-  items.forEach((item, index) => {
-    if (item.type === "userMessage") lastUserIndex = index;
-  });
-  // 任务进行中的精简实时视图：思考过程隐藏、相邻命令合并为一条（默认
-  // 折叠）、只有过程消息展开
+  const [processesOpen, setProcessesOpen] = useState(live);
+  const previousLiveRef = useRef(live);
+
+  useEffect(() => {
+    if (previousLiveRef.current && !live) setProcessesOpen(false);
+    previousLiveRef.current = live;
+  }, [live]);
+
+  const lastUserItem = [...items].reverse().find((item) => item.type === "userMessage");
+  let displayItems: Array<ThreadItem & { mergedCount?: number }> = items;
+
+  // 任务进行中保留精简实时视图：隐藏思考正文，并合并相邻命令。
   if (live) {
     const merged: Array<ThreadItem & { mergedCount?: number }> = [];
     for (const item of items) {
@@ -616,29 +561,47 @@ function TurnView({ turn, processesOpen, editable, onEdit, live }: {
         merged.push(item);
       }
     }
-    return (
-      <section className="turn-block" data-status={turn.status}>
-        {merged.map((item, index) => {
-          if (item.type === "reasoning" || item.type === "plan") return null;
-          const commentary = item.type === "agentMessage" && item.phase === "commentary";
-          return (
-            <ItemView
-              key={item.id ?? `${turn.id}-${index}`}
-              item={item}
-              alwaysOpen={commentary}
-              mergedCount={item.mergedCount}
-              editable={editable && index === lastUserIndex}
-              onEdit={onEdit}
-            />
-          );
-        })}
-        {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
-        {turn.error !== null && turn.error !== undefined && <div className="turn-error"><CircleAlert size={16} />{stringify(turn.error)}</div>}
-      </section>
-    );
+    displayItems = merged.filter((item) => item.type !== "reasoning" && item.type !== "plan");
   }
-  // 整轮都是过程内容时，折叠会导致一片空白——这类轮次始终展开展示
-  const forceShow = items.length > 0 && !items.some((item) => !isProcessItem(item));
+
+  const processItems = displayItems.filter(isProcessItem);
+  const contentItems = displayItems.filter((item) => !isProcessItem(item));
+  const forceShow = processItems.length > 0 && contentItems.length === 0;
+  const finalIndex = contentItems.findIndex(isFinalAnswer);
+  const processInsertIndex = finalIndex >= 0
+    ? finalIndex
+    : contentItems.findIndex((item) => item.type !== "userMessage");
+  const insertAt = processInsertIndex >= 0 ? processInsertIndex : contentItems.length;
+  const answerPreferences = turn.preferences ?? preferences;
+
+  const renderProcessItems = () => processItems.map((item, index) => {
+    const commentary = item.type === "agentMessage" && item.phase === "commentary";
+    return (
+      <ItemView
+        key={item.id ?? `${turn.id}-process-${index}`}
+        item={item}
+        alwaysOpen={forceShow || commentary || (!live && processesOpen)}
+        mergedCount={item.mergedCount}
+        onEdit={onEdit}
+      />
+    );
+  });
+
+  const processBlock = processItems.length > 0 && !forceShow ? (
+    <>
+      <button
+        type="button"
+        className="turn-process-toggle"
+        aria-expanded={processesOpen}
+        onClick={() => setProcessesOpen((current) => !current)}
+      >
+        {processesOpen ? <ChevronsDownUp size={15} /> : <ChevronsUpDown size={15} />}
+        {processesOpen ? "收起过程" : "展开过程"}
+      </button>
+      {processesOpen && renderProcessItems()}
+    </>
+  ) : null;
+
   return (
     <section className="turn-block" data-status={turn.status}>
       {items.length === 0 && (
@@ -647,20 +610,36 @@ function TurnView({ turn, processesOpen, editable, onEdit, live }: {
       {items.length > 0 && turn.status === "interrupted" && (
         <div className="system-note interrupted-note"><CircleAlert size={14} />该轮次已中断，以下为中断前的过程内容</div>
       )}
-      {items.map((item, index) => (
-        processesOpen || forceShow || !isProcessItem(item)
-          ? <ItemView
-              key={item.id ?? `${turn.id}-${index}`}
-              item={item}
-              alwaysOpen={forceShow}
-              editable={editable && index === lastUserIndex}
-              onEdit={onEdit}
-            />
-          : null
+      {forceShow && renderProcessItems()}
+      {contentItems.map((item, index) => (
+        <Fragment key={item.id ?? `${turn.id}-${index}`}>
+          {index === insertAt && processBlock}
+          <ItemView
+            item={item}
+            editable={editable && item === lastUserItem}
+            onEdit={onEdit}
+          />
+          {isFinalAnswer(item) && <AnswerSettings preferences={answerPreferences} models={models} />}
+        </Fragment>
       ))}
+      {insertAt === contentItems.length && processBlock}
       {turn.status === "inProgress" && <div className="working-indicator"><LoaderCircle className="spin" size={15} />Codex 正在处理</div>}
       {turn.error !== null && turn.error !== undefined && <div className="turn-error"><CircleAlert size={16} />{stringify(turn.error)}</div>}
     </section>
+  );
+}
+
+const isFinalAnswer = (item: ThreadItem): boolean =>
+  item.type === "agentMessage" && item.phase !== "commentary";
+
+function AnswerSettings({ preferences, models }: { preferences: Preferences; models: Model[] }) {
+  const model = models.find((entry) => entry.model === preferences.model || entry.id === preferences.model);
+  return (
+    <div className="answer-settings" aria-label="回答设置">
+      <span>模型：{model?.displayName ?? preferences.model ?? "默认"}</span>
+      <span>思考：{preferences.effort ? effortLabel(preferences.effort) : "默认"}</span>
+      <span>权限：{preferences.fullAccess ? "完全访问" : "工作区写入"}</span>
+    </div>
   );
 }
 

@@ -389,15 +389,29 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
   }
 
   app.use((error: unknown, _request: Request, response: Response, _next: unknown) => {
+    if (isJsonSyntaxError(error)) {
+      response.status(400).json({ error: "请求体不是有效的 JSON" });
+      return;
+    }
+    if (isRecord(error) && error.type === "entity.too.large") {
+      response.status(413).json({ error: "请求体过大" });
+      return;
+    }
     console.error(error);
     jsonError(response, 500, "服务器内部错误");
   });
   return app;
 };
 
+const isJsonSyntaxError = (error: unknown): boolean =>
+  error instanceof SyntaxError && isRecord(error) && error.type === "entity.parse.failed";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
 export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, service: CodexService) => {
   const clients = new Map<WebSocket, { clientId: string; tokenHash: string; lastTouchAt: number }>();
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   const send = (socket: WebSocket, message: unknown): void => {
     if (socket.readyState !== WebSocket.OPEN) return;
@@ -426,7 +440,9 @@ export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, servi
     const clientId = crypto.randomUUID();
     const client = { clientId, tokenHash: resolved.tokenHash, lastTouchAt: Date.now() };
     clients.set(socket, client);
-    void service.snapshot().then((snapshot) => send(socket, { type: "snapshot", payload: snapshot }));
+    void service.snapshot()
+      .then((snapshot) => send(socket, { type: "snapshot", payload: snapshot }))
+      .catch(() => send(socket, { type: "error", payload: { message: "无法加载初始状态" } }));
     send(socket, { type: "connection", payload: { connected: true, message: "实时连接已建立" } });
 
     socket.on("message", (raw: Buffer) => {

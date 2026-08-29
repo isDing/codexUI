@@ -84,6 +84,28 @@ describe("authentication API", () => {
       .expect(403);
   });
 
+  it("returns a client error for malformed JSON instead of leaking parser details", async () => {
+    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    await request(app)
+      .post("/api/auth/login")
+      .set("origin", config.allowedOrigin)
+      .set("content-type", "application/json")
+      .send('{"username":')
+      .expect(400)
+      .expect(({ body }) => expect(body).toEqual({ error: "请求体不是有效的 JSON" }));
+  });
+
+  it("rejects oversized request bodies with 413", async () => {
+    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    await request(app)
+      .post("/api/auth/login")
+      .set("origin", config.allowedOrigin)
+      .set("content-type", "application/json")
+      .send(JSON.stringify({ username: "admin", password: "x".repeat(2_100_000) }))
+      .expect(413)
+      .expect(({ body }) => expect(body).toEqual({ error: "请求体过大" }));
+  });
+
   it("does not let a client bypass login throttling with a forged proxy chain", async () => {
     config.trustProxy = true;
     const app = createApp(config, db, new FakeService() as unknown as CodexService);

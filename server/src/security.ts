@@ -20,9 +20,16 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
-  const [algorithm, salt, expectedText] = encoded.split("$");
-  if (algorithm !== "scrypt" || !salt || !expectedText) return false;
-  const expected = Buffer.from(expectedText, "base64url");
-  const actual = (await scrypt(password, salt, expected.length)) as Buffer;
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  try {
+    const [algorithm, salt, expectedText] = encoded.split("$");
+    if (algorithm !== "scrypt" || !salt || !expectedText) return false;
+    const expected = Buffer.from(expectedText, "base64url");
+    if (expected.length !== 64) return false;
+    const actual = (await scrypt(password, salt, expected.length)) as Buffer;
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    // A malformed deployment secret must be treated as a failed login, not an
+    // internal server error that reveals configuration details.
+    return false;
+  }
 }

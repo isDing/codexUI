@@ -1,4 +1,4 @@
-import { Archive, Code2, LoaderCircle, MessageSquare, Plus, X } from "lucide-react";
+import { Archive, Code2, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { relativeTime, sourceLabel, threadTitle } from "./lib";
 import type { Thread } from "./types";
@@ -16,10 +16,28 @@ export function IconButton({ title, onClick, children }: { title: string; onClic
   return <button className="icon-button" title={title} aria-label={title} onClick={onClick}>{children}</button>;
 }
 
-export function SidebarHeading({ icon, title, onClose }: { icon: ReactNode; title: string; onClose: () => void }) {
+export function SidebarHeading({ icon, title, onClose, collapsed = false, onToggle }: {
+  icon: ReactNode;
+  title: string;
+  onClose: () => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
   return (
-    <header className="sidebar-heading">
-      <span>{icon}<strong>{title}</strong></span>
+    <header className={`sidebar-heading ${collapsed ? "collapsed" : ""}`}>
+      <span className="sidebar-heading-title">{icon}<strong>{title}</strong></span>
+      {onToggle && (
+        <button
+          type="button"
+          className="sidebar-toggle"
+          title={collapsed ? "展开左侧边栏" : "收起左侧边栏"}
+          aria-label={collapsed ? "展开左侧边栏" : "收起左侧边栏"}
+          aria-expanded={!collapsed}
+          onClick={onToggle}
+        >
+          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        </button>
+      )}
       <button className="drawer-close" onClick={onClose} title="关闭"><X size={18} /></button>
     </header>
   );

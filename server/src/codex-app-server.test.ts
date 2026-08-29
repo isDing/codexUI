@@ -74,4 +74,29 @@ describe("Codex app-server lifecycle", () => {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("does not launch a second process when a request races a scheduled reconnect", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-rpc-reconnect-"));
+    const server = new CodexAppServer(testConfig(directory, createFakeCodex(directory)));
+    try {
+      await server.start();
+      const first = await server.request<{ pid: number }>("identity");
+      const internals = server as unknown as {
+        process: { kill: (signal: string) => void } | null;
+        handleExit(child: object, error: Error): void;
+      };
+      const oldProcess = internals.process;
+      expect(oldProcess).not.toBeNull();
+      oldProcess?.kill("SIGTERM");
+      internals.handleExit(oldProcess!, new Error("simulated disconnect"));
+      const recovered = await server.request<{ pid: number }>("identity");
+      expect(recovered.pid).not.toBe(first.pid);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      const stillRecovered = await server.request<{ pid: number }>("identity");
+      expect(stillRecovered.pid).toBe(recovered.pid);
+    } finally {
+      await server.stop();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

@@ -87,6 +87,9 @@ export class CodexAppServer extends EventEmitter {
 
   private ensureReady(): Promise<void> {
     if (this.stopped) return Promise.reject(new Error("Codex app-server is stopped"));
+    // API 请求本身就是一个恢复信号：若异常退出后的退避重启尚未触发，
+    // 立即复用这次启动并取消原定时器，避免随后再拉起第二个子进程。
+    this.clearRestartTimer();
     if (!this.readyPromise) this.readyPromise = this.launch();
     return this.readyPromise;
   }

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        CODEX_VERSION: "0.147.0"
+        CODEX_VERSION: "0.150.1"
     image: codexui:latest
     container_name: codexui
     init: true
@@ -20,7 +20,7 @@ services:
       WEB_DIST: /app/web/dist
       WORKSPACE_ROOTS: ${CODE_DIR:-/home/user/code}:${SERVER_DIR:-/home/user/server}
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-http://localhost:5173}
-      SECURE_COOKIES: ${SECURE_COOKIES:-"false"}
+      SECURE_COOKIES: ${SECURE_COOKIES:-"true"}
       TRUST_PROXY: ${TRUST_PROXY:-"false"}
     ports:
       - "127.0.0.1:${PORT_MAP:-3090}:3000"

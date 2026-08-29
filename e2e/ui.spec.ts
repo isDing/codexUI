@@ -58,7 +58,16 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.getByText("Codex 在线")).toBeVisible();
   await expect(page.locator(".app-version").first()).toHaveText(/^v\d+\.\d+\.\d+$/);
-  await expect(page.getByRole("navigation", { name: "工作区" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "工作区与会话" })).toBeVisible();
+
+  // 左侧栏可收起为窄栏，刷新后保留状态，再次点击可展开。
+  await page.getByRole("button", { name: "收起左侧边栏" }).click();
+  await expect(page.locator(".app-shell.sidebar-collapsed")).toBeVisible();
+  await expect(page.getByRole("button", { name: "展开左侧边栏" })).toBeVisible();
+  await page.reload();
+  await expect(page.locator(".app-shell.sidebar-collapsed")).toBeVisible();
+  await page.getByRole("button", { name: "展开左侧边栏" }).click();
+  await expect(page.locator(".app-shell.sidebar-collapsed")).toHaveCount(0);
 
   await openFirstPopulatedWorkspace(page);
   await openFirstIdleThread(page);
@@ -68,36 +77,40 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   const agentBody = page.locator(".agent-message .markdown-body");
   if ((await agentBody.count()) > 0) await expect(agentBody.first()).toBeVisible();
 
-  // 过程展开/收起（纯过程内容的轮次始终展示，不受折叠开关影响）
-  const processDetails = page.locator("details.reasoning-item, details.tool-item, details.commentary-message");
-  const openProcessDetails = page.locator("details.reasoning-item[open], details.tool-item[open], details.commentary-message[open]");
-  const initialOpen = await openProcessDetails.count();
-  await page.getByRole("button", { name: "展开过程" }).click();
-  await expect(page.getByRole("button", { name: "收起过程" })).toBeVisible();
-  const processCount = await processDetails.count();
-  if (processCount > 0) {
-    await expect.poll(() => openProcessDetails.count()).toBe(processCount);
-    await expect(processDetails.first()).toBeVisible();
+  // 每轮过程独立展开；操作一轮不会改变其他轮次。
+  const processToggles = page.getByRole("button", { name: "展开过程" });
+  if ((await processToggles.count()) > 0) {
+    const firstTurnIndex = await page.locator(".turn-block").evaluateAll((turns) =>
+      turns.findIndex((turn) => turn.querySelector(".turn-process-toggle")?.textContent?.includes("展开过程")),
+    );
+    const firstTurn = page.locator(".turn-block").nth(firstTurnIndex);
+    const firstToggle = firstTurn.getByRole("button", { name: "展开过程" });
+    const otherToggleCount = (await processToggles.count()) - 1;
+    await firstToggle.click();
+    await expect(firstTurn.getByRole("button", { name: "收起过程" })).toBeVisible();
+    await expect(firstTurn.locator("details.reasoning-item, details.tool-item, details.commentary-message").first()).toBeVisible();
+    if (otherToggleCount > 0) await expect(page.getByRole("button", { name: "展开过程" })).toHaveCount(otherToggleCount);
+    await firstTurn.getByRole("button", { name: "收起过程" }).click();
+    await expect(firstTurn.getByRole("button", { name: "展开过程" })).toBeVisible();
   }
-  await page.getByRole("button", { name: "收起过程" }).click();
-  await expect.poll(() => openProcessDetails.count()).toBe(initialOpen);
   await page.screenshot({ path: "test-results/conversation-desktop.png", fullPage: true });
 
-  // 记录当前会话的偏好设置与所在工作区
-  const modelValue = await page.locator(".session-controls select").first().inputValue();
-  const effortValue = await page.locator(".session-controls select").nth(1).inputValue();
-  const fullAccess = await page.locator(".access-toggle input").isChecked();
+  // 最终回答下方以只读文本展示该轮设置。
+  const answerSettings = page.locator(".answer-settings");
+  if ((await page.locator(".agent-message").count()) > 0) {
+    await expect(answerSettings.first()).toContainText("模型：");
+    await expect(answerSettings.first()).toContainText("思考：");
+    await expect(answerSettings.first()).toContainText("权限：");
+  }
   const workspacePath = await page.locator(".workspace-row.selected .workspace-copy small").textContent();
 
-  // 刷新后：选中项与偏好设置应完整恢复
+  // 刷新后：工作区树与选中会话应完整恢复。
   await page.reload();
   await expect(page.getByPlaceholder("发送新的需求")).toBeVisible();
   await expect(page.locator(".workspace-row.selected")).toHaveCount(1);
   await expect(page.locator(".workspace-row.selected .workspace-copy small")).toHaveText(workspacePath?.trim() ?? "");
   await expect(page.locator(".thread-row.selected")).toHaveCount(1);
-  await expect(page.locator(".session-controls select").first()).toHaveValue(modelValue);
-  await expect(page.locator(".session-controls select").nth(1)).toHaveValue(effortValue);
-  await expect(page.locator(".access-toggle input")).toBeChecked({ checked: fullAccess });
+  await expect(page.locator(".session-controls, .access-toggle")).toHaveCount(0);
 
   // 新建会话对话框默认选中当前工作区
   await page.getByRole("button", { name: "新建会话" }).click();
@@ -453,14 +466,14 @@ test("refresh while WebSocket is still connecting never crashes", async ({ page 
 test("mobile drawers and conversation remain usable", async ({ page }) => {  await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
 
-  await page.getByRole("button", { name: "工作区", exact: true }).click();
+  await page.getByRole("button", { name: "工作区与会话", exact: true }).click();
   await expect(page.locator(".workspace-sidebar.drawer-open")).toBeVisible();
   await page.getByRole("button", { name: "新增工作区", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "新增工作区" })).toBeVisible();
   await expect(page.getByLabel("工作区路径")).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await openFirstPopulatedWorkspace(page);
-  await expect(page.locator(".thread-sidebar.drawer-open")).toBeVisible();
+  await expect(page.locator(".workspace-sidebar.drawer-open .workspace-threads")).toBeVisible();
   await openFirstIdleThread(page);
   await expect(page.locator(CONTENT).first()).toBeVisible();
   await page.screenshot({ path: "test-results/conversation-mobile.png", fullPage: true });
@@ -512,7 +525,8 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   // iOS 自动缩放防护：移动端输入控件字号必须 ≥16px，否则聚焦时页面会被系统放大
   const inputFont = await page.locator(".composer textarea").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(inputFont).toBeGreaterThanOrEqual(16);
-  // 模型/思考强度选择器保持小字号，不受 16px 规则影响
-  const modelSelectFont = await page.locator(".session-controls select").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
-  expect(modelSelectFont).toBeLessThan(16);
+  const settings = page.locator(".answer-settings").last();
+  await expect(settings).toContainText("模型：");
+  const settingsFont = await settings.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(settingsFont).toBeLessThan(16);
 });

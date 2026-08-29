@@ -5,6 +5,7 @@ export type ThreadItem = Record<string, unknown> & { type: string; id?: string }
 export type Turn = {
   id: string;
   items: ThreadItem[];
+  preferences?: Preferences;
   status: string;
   error: unknown;
   startedAt: number | null;

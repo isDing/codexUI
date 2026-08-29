@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import type { AppConfig } from "./config.js";
 import { CodexAppServer } from "./codex-app-server.js";
 import type { AppDatabase } from "./database.js";
@@ -63,6 +65,7 @@ export const preferencesFromRuntimeSettings = (
   fallback: ThreadPreferences = { model: null, effort: null, fullAccess: false },
 ): ThreadPreferences => {
   const profileId = permissionProfileId(settings.activePermissionProfile ?? settings.active_permission_profile);
+  const hasPermissionProfile = profileId !== null || isRecord(settings.permission_profile);
   const approvalPolicy = settings.approvalPolicy ?? settings.approval_policy;
   const sandbox = settings.sandbox ?? settings.sandboxPolicy ?? settings.sandbox_mode;
   const profileDisabled = isRecord(settings.permission_profile) && settings.permission_profile.type === "disabled";
@@ -74,7 +77,7 @@ export const preferencesFromRuntimeSettings = (
   return {
     model: stringValue(settings.model) ?? fallback.model,
     effort: stringValue(settings.reasoningEffort ?? settings.effort) ?? fallback.effort,
-    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined ? fallback.fullAccess : false),
+    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined && !hasPermissionProfile ? fallback.fullAccess : false),
   };
 };
 
@@ -83,9 +86,10 @@ export const preferencesFromPersistedSettings = (
   fallback: ThreadPreferences = { model: null, effort: null, fullAccess: false },
 ): ThreadPreferences => {
   const profileId = permissionProfileId(settings.active_permission_profile ?? settings.activePermissionProfile);
+  const hasPermissionProfile = profileId !== null || isRecord(settings.permission_profile);
   const profileDisabled = isRecord(settings.permission_profile) && settings.permission_profile.type === "disabled";
   const approvalPolicy = settings.approval_policy ?? settings.approvalPolicy;
-  const sandbox = settings.sandbox_mode ?? settings.sandbox ?? settings.sandboxPolicy;
+  const sandbox = settings.sandbox_mode ?? settings.sandbox_policy ?? settings.sandbox ?? settings.sandboxPolicy;
   const fullAccess =
     profileId === ":danger-full-access" ||
     profileDisabled ||
@@ -94,7 +98,7 @@ export const preferencesFromPersistedSettings = (
   return {
     model: stringValue(settings.model) ?? fallback.model,
     effort: stringValue(settings.reasoning_effort ?? settings.reasoningEffort ?? settings.effort) ?? fallback.effort,
-    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined ? fallback.fullAccess : false),
+    fullAccess: fullAccess || (approvalPolicy === undefined && sandbox === undefined && !hasPermissionProfile ? fallback.fullAccess : false),
   };
 };
 
@@ -108,6 +112,38 @@ const persistedSettingsFromLine = (line: string): JsonObject | null => {
   } catch {
     return null;
   }
+};
+
+const persistedTurnPreferenceEvent = (line: string): { settings?: JsonObject; turnId?: string } | null => {
+  try {
+    const event = JSON.parse(line) as { type?: unknown; payload?: unknown };
+    if (!isRecord(event.payload)) return null;
+    const payload = event.payload;
+    if (payload.type === "thread_settings_applied" && isRecord(payload.thread_settings)) {
+      return { settings: payload.thread_settings };
+    }
+    const turnId = stringValue(payload.turn_id ?? payload.turnId);
+    if (event.type === "turn_context" && turnId) return { settings: payload, turnId };
+    if (payload.type === "task_started" && turnId) return { turnId };
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+export const preferencesByTurnFromPersistedLines = (
+  lines: Iterable<string>,
+  fallback: ThreadPreferences = { model: null, effort: null, fullAccess: false },
+): Map<string, ThreadPreferences> => {
+  let current = fallback;
+  const result = new Map<string, ThreadPreferences>();
+  for (const line of lines) {
+    const event = persistedTurnPreferenceEvent(line);
+    if (!event) continue;
+    if (event.settings) current = preferencesFromPersistedSettings(event.settings, current);
+    if (event.turnId) result.set(event.turnId, { ...current });
+  }
+  return result;
 };
 
 type PersistedSettingsResult = ThreadPreferences | null;
@@ -130,9 +166,11 @@ export class CodexService extends EventEmitter {
   private readonly threads = new Map<string, CodexThread>();
   private readonly pendingThreads = new Map<string, CodexThread>();
   private readonly pendingSince = new Map<string, number>();
-  private readonly readCache = new Map<string, { at: number; updatedAt: number; value: ReadThreadResult }>();
+  private readonly readCache = new Map<string, { at: number; updatedAt: number; statusType: CodexThread["status"]["type"]; value: ReadThreadResult }>();
   private readonly prefScanCache = new Map<string, { at: number; threadUpdatedAt: number; prefs: ThreadPreferences | null }>();
+  private readonly turnPrefScanCache = new Map<string, { mtimeMs: number; size: number; prefs: Map<string, ThreadPreferences> }>();
   private readonly startedTurnIds = new Map<string, string>();
+  private readonly startingTurns = new Set<string>();
   private lastActivityAt = Date.now();
   private recycling = false;
   private recycleArmed = true;
@@ -140,6 +178,9 @@ export class CodexService extends EventEmitter {
   private approvals = new Map<string, ApprovalRequest>();
   private viewers = new Map<string, string>();
   private pollTimer: NodeJS.Timeout | null = null;
+  private startPromise: Promise<void> | null = null;
+  private started = false;
+  private modelsPromise: Promise<void> | null = null;
   private polling = false;
   private connected = false;
 
@@ -176,17 +217,41 @@ export class CodexService extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    // 轮询先于连接启动：即使首次连接失败，连接恢复后轮询也能自动接管
-    this.pollTimer = setInterval(() => {
-      // 先检查回收（refreshThreads 入口会置 polling=true，必须在它之前调用）
-      this.maybeRecycle();
-      void this.refreshThreads(true);
-    }, this.config.pollIntervalMs);
-    await this.rpc.start();
-    await Promise.all([this.refreshThreads(false), this.refreshModels()]);
+    if (this.started) return;
+    if (this.startPromise) return this.startPromise;
+    const operation = (async () => {
+      // 轮询先于连接启动：即使首次连接失败，连接恢复后轮询也能自动接管。
+      if (!this.pollTimer) {
+        this.pollTimer = setInterval(() => {
+          // 先检查回收（refreshThreads 入口会置 polling=true，必须在它之前调用）
+          this.maybeRecycle();
+          void this.refreshThreads(true);
+        }, this.config.pollIntervalMs);
+      }
+      try {
+        await this.rpc.start();
+        const initialLoads = await Promise.allSettled([this.refreshThreads(false), this.refreshModels()]);
+        for (const result of initialLoads) {
+          if (result.status === "rejected") console.warn("Initial Codex state refresh failed:", result.reason);
+        }
+        this.started = true;
+      } catch (error) {
+        // 保留轮询定时器：CodexAppServer 会自行重连，连接恢复后轮询才能
+        // 自动补齐线程与模型状态。service.stop() 负责最终清理它。
+        throw error;
+      }
+    })();
+    this.startPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = null;
+    }
   }
 
   async stop(): Promise<void> {
+    this.started = false;
+    this.startPromise = null;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     await this.rpc.stop();
@@ -211,7 +276,12 @@ export class CodexService extends EventEmitter {
     const listThread = this.threads.get(threadId);
     const listUpdatedAt = listThread?.updatedAt ?? 0;
     const cached = this.readCache.get(threadId);
-    if (cached && cached.updatedAt === listUpdatedAt && now - cached.at < READ_CACHE_TTL_MS) {
+    if (
+      cached &&
+      cached.updatedAt === listUpdatedAt &&
+      cached.statusType === listThread?.status.type &&
+      now - cached.at < READ_CACHE_TTL_MS
+    ) {
       return cached.value;
     }
     const [result, history] = await Promise.all([
@@ -223,7 +293,14 @@ export class CodexService extends EventEmitter {
     ]);
     const metadata = result.thread;
     const archived = this.threads.get(metadata.id)?.archived ?? false;
-    const thread = { ...metadata, archived, turns: history.turns };
+    const turnPreferences = metadata.path
+      ? await this.readPersistedTurnPreferences(metadata.path, this.db.getPreferences(threadId))
+      : new Map<string, ThreadPreferences>();
+    const turns = history.turns.map((turn) => {
+      const preferences = turnPreferences.get(turn.id);
+      return preferences ? { ...turn, preferences } : turn;
+    });
+    const thread = { ...metadata, archived, turns };
     this.threads.set(metadata.id, { ...metadata, archived, turns: [] });
     // 读取会话不再调用 thread/resume：读操作应保持无副作用，
     // resume 只在真正发起 turn 时使用（见 startTurn）。
@@ -232,30 +309,44 @@ export class CodexService extends EventEmitter {
     this.db.setPreferences(threadId, preferences);
     const value = { thread, preferences, nextCursor: history.nextCursor };
     // 短 TTL 结果缓存：吸收快速来回切换会话带来的重复读取
-    this.readCache.set(threadId, { at: Date.now(), updatedAt: listUpdatedAt, value });
+    this.readCache.set(threadId, {
+      at: Date.now(),
+      updatedAt: listUpdatedAt,
+      statusType: metadata.status.type,
+      value,
+    });
     this.cachePrune(this.readCache);
     return value;
   }
 
   async readThreadHistory(threadId: string, cursor: string | null, limit = HISTORY_PAGE_SIZE) {
-    const result = await this.rpc.request<{
-      data: CodexThread["turns"];
-      nextCursor?: string | null;
-    }>("thread/turns/list", {
-      threadId,
-      cursor,
-      limit,
-      sortDirection: "desc",
-      itemsView: "full",
-    });
+    const source = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
+    const [result, preferencesByTurn] = await Promise.all([
+      this.rpc.request<{
+        data: CodexThread["turns"];
+        nextCursor?: string | null;
+      }>("thread/turns/list", {
+        threadId,
+        cursor,
+        limit,
+        sortDirection: "desc",
+        itemsView: "full",
+      }),
+      source?.path
+        ? this.readPersistedTurnPreferences(source.path, this.db.getPreferences(threadId))
+        : Promise.resolve(new Map<string, ThreadPreferences>()),
+    ]);
     return {
-      turns: [...result.data].reverse(),
+      turns: [...result.data].reverse().map((turn) => {
+        const preferences = preferencesByTurn.get(turn.id);
+        return preferences ? { ...turn, preferences } : turn;
+      }),
       nextCursor: result.nextCursor ?? null,
     };
   }
 
   async createThread(input: { cwd: string; model?: string | null; effort?: string | null; fullAccess: boolean }) {
-    const cwd = this.validateWorkspace(input.cwd);
+    const cwd = await this.validateWorkspace(input.cwd);
     const params: JsonObject = {
       cwd,
       model: input.model ?? undefined,
@@ -283,9 +374,7 @@ export class CodexService extends EventEmitter {
   }
 
   async addWorkspace(candidate: string) {
-    const workspacePath = this.validateWorkspace(candidate);
-    const stat = await fs.stat(workspacePath).catch(() => null);
-    if (!stat?.isDirectory()) throw new Error("工作区目录不存在或不是目录");
+    const workspacePath = await this.validateWorkspace(candidate);
     this.db.addWorkspacePath(workspacePath);
     const workspaces = await this.listWorkspaces();
     this.broadcast("workspaces.changed", { workspaces });
@@ -306,47 +395,53 @@ export class CodexService extends EventEmitter {
       await this.readThread(threadId);
       known = this.threads.get(threadId);
     }
-    const stored = this.db.getPreferences(threadId);
-    const model = input.model ?? stored.model;
-    const effort = input.effort ?? stored.effort;
-    const preferences: ThreadPreferences = {
-      model,
-      effort,
-      fullAccess: input.fullAccess,
-    };
-    if (!pending) {
-      await this.rpc.request("thread/resume", {
+    if (!known) throw new Error("会话不存在");
+    this.beginTurnStart(threadId, known);
+    try {
+      const stored = this.db.getPreferences(threadId);
+      const model = input.model ?? stored.model;
+      const effort = input.effort ?? stored.effort;
+      const preferences: ThreadPreferences = {
+        model,
+        effort,
+        fullAccess: input.fullAccess,
+      };
+      if (!pending) {
+        await this.rpc.request("thread/resume", {
+          threadId,
+          model: model ?? undefined,
+          approvalPolicy: input.fullAccess ? "never" : "on-request",
+          sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+        });
+      }
+      this.db.setPreferences(threadId, preferences);
+      this.db.markRead(threadId);
+      const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
         threadId,
+        input: [{ type: "text", text: input.text }],
         model: model ?? undefined,
+        effort: effort ?? undefined,
         approvalPolicy: input.fullAccess ? "never" : "on-request",
-        sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+        sandboxPolicy: input.fullAccess
+          ? { type: "dangerFullAccess" }
+          : {
+              type: "workspaceWrite",
+              writableRoots: [known.cwd],
+              networkAccess: true,
+              excludeTmpdirEnvVar: false,
+              excludeSlashTmp: false,
+            },
       });
+      this.pendingThreads.delete(threadId);
+      this.pendingSince.delete(threadId);
+      if (typeof result.turn?.id === "string") this.startedTurnIds.set(threadId, result.turn.id);
+      known.status = { type: "active" };
+      this.lastActivityAt = Date.now();
+      this.recycleArmed = true;
+      return result;
+    } finally {
+      this.startingTurns.delete(threadId);
     }
-    this.db.setPreferences(threadId, preferences);
-    this.db.markRead(threadId);
-    const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
-      threadId,
-      input: [{ type: "text", text: input.text }],
-      model: model ?? undefined,
-      effort: effort ?? undefined,
-      approvalPolicy: input.fullAccess ? "never" : "on-request",
-      sandboxPolicy: input.fullAccess
-        ? { type: "dangerFullAccess" }
-        : {
-            type: "workspaceWrite",
-            writableRoots: [this.threads.get(threadId)?.cwd].filter(Boolean),
-            networkAccess: true,
-            excludeTmpdirEnvVar: false,
-            excludeSlashTmp: false,
-      },
-    });
-    this.pendingThreads.delete(threadId);
-    this.pendingSince.delete(threadId);
-    const started = result;
-    if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
-    this.lastActivityAt = Date.now();
-    this.recycleArmed = true;
-    return result;
   }
 
   async retryTurn(
@@ -355,45 +450,54 @@ export class CodexService extends EventEmitter {
   ) {
     const known = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
     if (!known) throw new Error("会话不存在");
-    const stored = this.db.getPreferences(threadId);
-    const model = input.model ?? stored.model;
-    const effort = input.effort ?? stored.effort;
-    // rollback 只作用于本进程已加载的会话：先 resume 载入（失败则说明
-    // 会话被其他进程占用，直接向用户报错）
-    await this.rpc.request("thread/resume", {
-      threadId,
-      model: model ?? undefined,
-      approvalPolicy: input.fullAccess ? "never" : "on-request",
-      sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
-    });
-    // 撤销最后一轮（原需求与模型回复一并清除）
-    await this.rpc.request("thread/rollback", { threadId, numTurns: 1 });
-    this.readCache.delete(threadId);
-    this.prefScanCache.delete(threadId);
-    const preferences: ThreadPreferences = { model, effort, fullAccess: input.fullAccess };
-    this.db.setPreferences(threadId, preferences);
-    this.db.markRead(threadId);
-    const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
-      threadId,
-      input: [{ type: "text", text: input.text }],
-      model: model ?? undefined,
-      effort: effort ?? undefined,
-      approvalPolicy: input.fullAccess ? "never" : "on-request",
-      sandboxPolicy: input.fullAccess
-        ? { type: "dangerFullAccess" }
-        : {
-            type: "workspaceWrite",
-            writableRoots: [known.cwd].filter(Boolean),
-            networkAccess: true,
-            excludeTmpdirEnvVar: false,
-            excludeSlashTmp: false,
-        },
-    });
-    const started = result;
-    if (typeof started.turn?.id === "string") this.startedTurnIds.set(threadId, started.turn.id);
-    this.lastActivityAt = Date.now();
-    this.recycleArmed = true;
-    return result;
+    this.beginTurnStart(threadId, known);
+    try {
+      const stored = this.db.getPreferences(threadId);
+      const model = input.model ?? stored.model;
+      const effort = input.effort ?? stored.effort;
+      await this.rpc.request("thread/resume", {
+        threadId,
+        model: model ?? undefined,
+        approvalPolicy: input.fullAccess ? "never" : "on-request",
+        sandbox: input.fullAccess ? "danger-full-access" : "workspace-write",
+      });
+      await this.rpc.request("thread/rollback", { threadId, numTurns: 1 });
+      this.readCache.delete(threadId);
+      this.prefScanCache.delete(threadId);
+      const preferences: ThreadPreferences = { model, effort, fullAccess: input.fullAccess };
+      this.db.setPreferences(threadId, preferences);
+      this.db.markRead(threadId);
+      const result = await this.rpc.request<{ turn?: { id?: string } }>("turn/start", {
+        threadId,
+        input: [{ type: "text", text: input.text }],
+        model: model ?? undefined,
+        effort: effort ?? undefined,
+        approvalPolicy: input.fullAccess ? "never" : "on-request",
+        sandboxPolicy: input.fullAccess
+          ? { type: "dangerFullAccess" }
+          : {
+              type: "workspaceWrite",
+              writableRoots: [known.cwd],
+              networkAccess: true,
+              excludeTmpdirEnvVar: false,
+              excludeSlashTmp: false,
+            },
+      });
+      if (typeof result.turn?.id === "string") this.startedTurnIds.set(threadId, result.turn.id);
+      known.status = { type: "active" };
+      this.lastActivityAt = Date.now();
+      this.recycleArmed = true;
+      return result;
+    } finally {
+      this.startingTurns.delete(threadId);
+    }
+  }
+
+  private beginTurnStart(threadId: string, thread: CodexThread): void {
+    if (this.startingTurns.has(threadId) || this.startedTurnIds.has(threadId) || thread.status.type === "active") {
+      throw new Error("该会话已有任务正在执行");
+    }
+    this.startingTurns.add(threadId);
   }
 
   async cancelTurn(threadId: string, turnId?: string) {
@@ -534,6 +638,17 @@ export class CodexService extends EventEmitter {
   }
 
   private async refreshModels(): Promise<void> {
+    if (this.modelsPromise) return this.modelsPromise;
+    const operation = this.loadModels();
+    this.modelsPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.modelsPromise === operation) this.modelsPromise = null;
+    }
+  }
+
+  private async loadModels(): Promise<void> {
     const data: CodexModel[] = [];
     let cursor: string | null = null;
     do {
@@ -590,7 +705,14 @@ export class CodexService extends EventEmitter {
       let changed = next.size !== this.threads.size;
       for (const [id, thread] of next) {
         const before = this.threads.get(id);
-        if (!before || before.updatedAt !== thread.updatedAt || before.status.type !== thread.status.type) changed = true;
+        if (
+          !before ||
+          before.updatedAt !== thread.updatedAt ||
+          before.status.type !== thread.status.type ||
+          before.name !== thread.name ||
+          before.archived !== thread.archived ||
+          before.preview !== thread.preview
+        ) changed = true;
         if (before?.status.type === "active" && thread.status.type !== "active") this.recordCompletion(id);
       }
       this.threads.clear();
@@ -629,7 +751,7 @@ export class CodexService extends EventEmitter {
       this.pendingThreads.delete(threadId);
       this.pendingSince.delete(threadId);
       this.lastActivityAt = Date.now();
-    this.recycleArmed = true;
+      this.recycleArmed = true;
     }
     if (message.method === "thread/settings/updated" && threadId && isRecord(params.threadSettings)) {
       const preferences = preferencesFromRuntimeSettings(params.threadSettings, this.db.getPreferences(threadId));
@@ -717,6 +839,32 @@ export class CodexService extends EventEmitter {
     }
   }
 
+  private async readPersistedTurnPreferences(
+    filePath: string,
+    fallback: ThreadPreferences,
+  ): Promise<Map<string, ThreadPreferences>> {
+    try {
+      const stat = await fs.stat(filePath);
+      const cached = this.turnPrefScanCache.get(filePath);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.prefs;
+
+      let current = fallback;
+      const prefs = new Map<string, ThreadPreferences>();
+      const lines = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+      for await (const line of lines) {
+        const event = persistedTurnPreferenceEvent(line);
+        if (!event) continue;
+        if (event.settings) current = preferencesFromPersistedSettings(event.settings, current);
+        if (event.turnId) prefs.set(event.turnId, { ...current });
+      }
+      this.turnPrefScanCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, prefs });
+      this.cachePrune(this.turnPrefScanCache);
+      return prefs;
+    } catch {
+      return new Map();
+    }
+  }
+
   private sortedThreads(): CodexThread[] {
     return [...this.threads.values()].sort((a, b) => (b.recencyAt ?? b.updatedAt) - (a.recencyAt ?? a.updatedAt));
   }
@@ -750,13 +898,18 @@ export class CodexService extends EventEmitter {
       .sort((a, b) => b.latestAt - a.latestAt || a.name.localeCompare(b.name));
   }
 
-  private validateWorkspace(candidate: string): string {
+  private async validateWorkspace(candidate: string): Promise<string> {
     const resolved = path.resolve(candidate);
-    const known = new Set([...this.threads.values()].map((thread) => path.resolve(thread.cwd)));
-    const insideRoot = this.config.workspaceRoots.some(
-      (root) => resolved === root || resolved.startsWith(`${root}${path.sep}`),
+    const stat = await fs.stat(resolved).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error("工作区目录不存在或不是目录");
+    const realCandidate = await fs.realpath(resolved);
+    const realRoots = await Promise.all(
+      this.config.workspaceRoots.map((root) => fs.realpath(root).catch(() => path.resolve(root))),
     );
-    if (!insideRoot && !known.has(resolved)) throw new Error("工作区不在允许的目录中");
+    const insideRoot = realRoots.some(
+      (root) => realCandidate === root || realCandidate.startsWith(`${root}${path.sep}`),
+    );
+    if (!insideRoot) throw new Error("工作区不在允许的目录中");
     return resolved;
   }
 

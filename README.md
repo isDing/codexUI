@@ -22,6 +22,10 @@ openssl rand -base64 48
 
 Put the first command's output in `ADMIN_PASSWORD_HASH` and the second command's output in `SESSION_SECRET`. Login sessions expire after four hours without pointer, keyboard, or touch activity.
 
+Local development (`NODE_ENV=development`) defaults to non-`Secure` cookies so the Vite HTTP server works; production defaults to `Secure` cookies. Behind a reverse proxy, use HTTPS externally or set `SECURE_COOKIES` explicitly to match the public protocol.
+
+The production Compose profile also defaults `SECURE_COOKIES=true`. For a local HTTP-only Docker smoke test, set `SECURE_COOKIES=false` in `.env` and do not expose that instance publicly.
+
 Machine-specific paths and the public origin are also read from `.env`, with generic defaults in `compose.yaml`:
 
 ```bash

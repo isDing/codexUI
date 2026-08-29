@@ -37,6 +37,7 @@ export type CodexThread = {
 export type CodexTurn = {
   id: string;
   items: ThreadItem[];
+  preferences?: ThreadPreferences;
   status: string;
   error: unknown;
   startedAt: number | null;

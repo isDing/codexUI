@@ -293,6 +293,21 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     response.json({ unreadThreadIds: db.unreadThreadIds() });
   });
 
+  app.delete("/api/threads/:threadId", auth, requireCsrf, async (request: Request, response: Response) => {
+    const threadId = idParam.safeParse(request.params.threadId);
+    if (!threadId.success) {
+      response.status(400).json({ error: "会话 ID 无效" });
+      return;
+    }
+    try {
+      touch(request, db);
+      await service.deleteThread(threadId.data);
+      response.json({ ok: true });
+    } catch (error) {
+      jsonError(response, 404, error);
+    }
+  });
+
   app.post("/api/threads/:threadId/retry", auth, requireCsrf, async (request: Request, response: Response) => {
     const threadId = idParam.safeParse(request.params.threadId);
     const parsed = turnSchema.safeParse(request.body);

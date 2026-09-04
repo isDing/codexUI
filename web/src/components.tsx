@@ -1,4 +1,4 @@
-import { Archive, Code2, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, X } from "lucide-react";
+import { Archive, Code2, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { relativeTime, sourceLabel, threadTitle } from "./lib";
 import type { Thread } from "./types";
@@ -43,25 +43,41 @@ export function SidebarHeading({ icon, title, onClose, collapsed = false, onTogg
   );
 }
 
-export function ThreadRow({ thread, selected, unread, onSelect }: {
+export function ThreadRow({ thread, selected, unread, onSelect, onDelete, deleting = false }: {
   thread: Thread;
   selected: boolean;
   unread: boolean;
   onSelect: () => void;
+  onDelete: (thread: Thread) => void;
+  deleting?: boolean;
 }) {
   return (
-    <button className={`thread-row ${selected ? "selected" : ""} ${unread ? "unread" : ""}`} onClick={onSelect}>
-      <span className="thread-title-line">
-        <strong>{threadTitle(thread)}</strong>
-        {thread.status.type === "active" && <LoaderCircle className="spin active-icon" size={15} />}
-        {thread.archived && <Archive size={14} />}
-        {unread && <span className="unread-dot" title="任务已完成" />}
-      </span>
-      <span className="thread-meta">
-        <span>{sourceLabel(thread.source)}</span>
-        <time>{relativeTime((thread.recencyAt ?? thread.updatedAt) * 1000)}</time>
-      </span>
-    </button>
+    <div className={`thread-row ${selected ? "selected" : ""} ${unread ? "unread" : ""}`}>
+      <button className="thread-row-main" onClick={onSelect} aria-pressed={selected}>
+        <span className="thread-title-line">
+          <strong>{threadTitle(thread)}</strong>
+          {thread.status.type === "active" && <LoaderCircle className="spin active-icon" size={15} />}
+          {thread.archived && <Archive size={14} />}
+          {unread && <span className="unread-dot" title="任务已完成" />}
+        </span>
+        <span className="thread-meta">
+          <span>{sourceLabel(thread.source)}</span>
+          <time>{relativeTime((thread.recencyAt ?? thread.updatedAt) * 1000)}</time>
+        </span>
+      </button>
+      <button
+        className="thread-row-delete"
+        title="删除会话"
+        aria-label={`删除会话 ${threadTitle(thread)}`}
+        disabled={deleting}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete(thread);
+        }}
+      >
+        {deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+      </button>
+    </div>
   );
 }
 

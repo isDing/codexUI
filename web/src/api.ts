@@ -54,6 +54,13 @@ export class ApiClient {
     );
   }
 
+  deleteThread(threadId: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/threads/${encodeURIComponent(threadId)}`, {
+      method: "DELETE",
+      headers: { "x-csrf-token": this.csrfToken },
+    });
+  }
+
   runCommand(threadId: string, command: string, args?: string): Promise<{ ok: boolean }> {
     return this.request(
       `/api/threads/${encodeURIComponent(threadId)}/command`,

@@ -102,7 +102,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .input-with-icon input { min-width: 0; width: 100%; height: 100%; padding: 0; color: var(--ink); background: transparent; border: 0; outline: 0; }
 .form-error { display: flex; align-items: flex-start; gap: 8px; padding: 10px 11px; color: #8f2f2b; background: var(--red-soft); border: 1px solid #ecc7c3; border-radius: 6px; font-size: 13px; }
 
-.primary-button, .secondary-button, .new-thread-button {
+.primary-button, .secondary-button, .danger-button, .new-thread-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -119,6 +119,8 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .primary-button.compact { min-height: 34px; padding: 0 11px; }
 .secondary-button { color: #3e4742; background: #fff; border: 1px solid var(--line-strong); }
 .secondary-button:hover { background: var(--panel-soft); }
+.danger-button { color: #fff; background: #8d312c; border: 1px solid #8d312c; }
+.danger-button:hover:not(:disabled) { background: #a63c35; border-color: #a63c35; }
 .login-button { width: 100%; height: 42px; margin-top: 2px; }
 .icon-button {
   display: grid;
@@ -231,11 +233,16 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .search-box input { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; font-size: 12px; }
 .workspace-threads { position: relative; display: grid; gap: 2px; padding: 3px 0 7px 25px; }
 .workspace-threads::before { position: absolute; top: 0; bottom: 8px; left: 16px; width: 1px; content: ""; background: #d2d8d4; }
-.thread-row { display: grid; gap: 7px; width: 100%; min-height: 58px; padding: 10px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.thread-row { display: flex; align-items: center; gap: 2px; width: 100%; min-height: 58px; padding: 10px 6px 10px 10px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; }
 .thread-row:hover { background: rgba(255,255,255,0.62); }
 .thread-row.selected { background: #fff; border-color: #cbd4ce; }
 .thread-row.unread { background: var(--amber-soft); border-color: #f0d5a5; }
 .thread-row.unread.selected { background: #f6e7c8; }
+.thread-row-main { display: grid; flex: 1; gap: 7px; min-width: 0; padding: 0; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.thread-row-delete { flex: 0 0 auto; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease; }
+.thread-row:hover .thread-row-delete, .thread-row-delete:focus-visible { opacity: 1; }
+.thread-row-delete:hover { color: #a63c35; background: var(--red-soft); }
+@media (hover: none) { .thread-row-delete { opacity: 0.55; } }
 .thread-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .thread-title-line strong { flex: 1; overflow: hidden; font-size: 12.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .thread-title-line svg { flex: 0 0 auto; color: var(--muted); }
@@ -382,6 +389,7 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 .dialog > header > div { display: flex; align-items: center; gap: 8px; }
 .dialog h2 { margin: 0; font-size: 14px; }
 .dialog-body { display: grid; gap: 17px; padding: 20px; }
+.delete-dialog-warning { margin: 0; color: #48504c; font-size: 13px; line-height: 1.6; }
 .dialog-body input { width: 100%; height: 39px; padding: 0 10px; color: var(--ink); background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 5px; font-size: 12px; }
 .dialog-body select { width: 100%; height: 39px; padding: 0 10px; color: var(--ink); background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 5px; font-size: 12px; }
 .dialog > footer, .dialog > form > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 17px; background: var(--panel-soft); border-top: 1px solid var(--line); }

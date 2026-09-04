@@ -112,6 +112,11 @@ export class AppDatabase {
     return rows.map((row) => row.path);
   }
 
+  deleteThreadState(threadId: string): void {
+    this.db.prepare("DELETE FROM thread_preferences WHERE thread_id = ?").run(threadId);
+    this.db.prepare("DELETE FROM thread_notices WHERE thread_id = ?").run(threadId);
+  }
+
   markUnread(threadId: string, completedAt = Date.now()): void {
     this.db
       .prepare(`

@@ -1,4 +1,4 @@
-import { CircleAlert, FolderPlus, LoaderCircle, Plus, X } from "lucide-react";
+import { CircleAlert, FolderPlus, LoaderCircle, Plus, Trash2, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { IconButton } from "./components";
 import { errorMessage } from "./lib";
@@ -66,6 +66,38 @@ export function NewThreadDialog({ workspaces, initialWorkspace, onClose, onCreat
         {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       </div>
       <footer><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => void create()} disabled={submitting || !cwd}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}创建</button></footer>
+    </section>
+  );
+}
+
+export function ConfirmDeleteDialog({ title, onClose, onConfirm }: {
+  title: string;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const confirm = async () => {
+    setSubmitting(true);
+    setError("");
+    try {
+      await onConfirm();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+      <header><div><Trash2 size={18} /><h2 id="delete-dialog-title">删除会话</h2></div><IconButton title="关闭" onClick={onClose}><X size={18} /></IconButton></header>
+      <div className="dialog-body">
+        <p className="delete-dialog-warning">确定要删除「{title}」吗？该操作将永久删除会话记录及其会话文件，且无法恢复。</p>
+        {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      </div>
+      <footer><button className="secondary-button" onClick={onClose}>取消</button><button className="danger-button" onClick={() => void confirm()} disabled={submitting}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}确认删除</button></footer>
     </section>
   );
 }

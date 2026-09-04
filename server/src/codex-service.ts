@@ -523,6 +523,45 @@ export class CodexService extends EventEmitter {
     return result;
   }
 
+  async deleteThread(threadId: string): Promise<void> {
+    const known = this.threads.get(threadId) ?? this.pendingThreads.get(threadId);
+    if (!known) throw new Error("会话不存在");
+    // 正在执行的任务先中断，避免删除 rollout 时留下未完成的写入
+    const activeTurnId = this.startedTurnIds.get(threadId);
+    if (activeTurnId) {
+      await this.rpc.request("turn/interrupt", { threadId, turnId: activeTurnId }).catch(() => undefined);
+    }
+    // 清理该会话遗留的待处理审批请求
+    let approvalsChanged = false;
+    for (const [key, request] of this.approvals) {
+      if (typeof request.params.threadId === "string" && request.params.threadId === threadId) {
+        this.approvals.delete(key);
+        approvalsChanged = true;
+      }
+    }
+    if (approvalsChanged) this.broadcast("requests.changed", { pendingRequests: this.publicApprovals() });
+    // app-server 负责删除 rollout 文件与状态库记录（含派生子线程）
+    await this.rpc.request("thread/delete", { threadId });
+    this.forgetThread(threadId, known.path);
+    this.db.deleteThreadState(threadId);
+    this.broadcast("threads.changed", { threads: this.sortedThreads() });
+    this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
+  }
+
+  private forgetThread(threadId: string, filePath: string | null | undefined): void {
+    this.threads.delete(threadId);
+    this.pendingThreads.delete(threadId);
+    this.pendingSince.delete(threadId);
+    this.readCache.delete(threadId);
+    this.prefScanCache.delete(threadId);
+    this.startedTurnIds.delete(threadId);
+    if (filePath) {
+      for (const key of [...this.turnPrefScanCache.keys()]) {
+        if (key === filePath) this.turnPrefScanCache.delete(key);
+      }
+    }
+  }
+
   markRead(threadId: string): void {
     this.db.markRead(threadId);
     this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
@@ -624,7 +663,10 @@ export class CodexService extends EventEmitter {
   private maybeRecycle(): void {
     if (!this.recycleArmed || this.recycling || !this.connected || this.polling) return;
     const hasActiveTurn = [...this.threads.values()].some((thread) => thread.status.type === "active");
-    if (hasActiveTurn || this.approvals.size > 0) return;
+    // thread/start 返回的线程可能尚未写入状态库。回收 app-server 会丢失
+    // 这类 pending thread，随后首个 turn/start 只能得到 "thread not found"。
+    // 保持进程存活，直到首个 turn 启动并将线程物化到状态库。
+    if (hasActiveTurn || this.startingTurns.size > 0 || this.pendingThreads.size > 0 || this.approvals.size > 0) return;
     if (Date.now() - this.lastActivityAt < RECYCLE_IDLE_MS) return;
     this.recycling = true;
     // 每次空闲期只回收一次；有新活动后重新武装
@@ -690,9 +732,9 @@ export class CodexService extends EventEmitter {
 
       for (const [threadId, thread] of this.pendingThreads) {
         if (next.has(threadId)) {
-          // 已进入 Codex 状态库，升级为普通会话
-          this.pendingThreads.delete(threadId);
-          this.pendingSince.delete(threadId);
+          // thread/list 可能返回当前 app-server 内存中的空线程，这并不代表它
+          // 已经可以在进程重启后恢复。只有首个 turn 真正启动后才能清除 pending。
+          continue;
         } else if (Date.now() - (this.pendingSince.get(threadId) ?? Date.now()) >= PENDING_THREAD_TTL_MS) {
           // 创建失败或从未落库的会话：超时移除，避免永久驻留内存与界面
           this.pendingThreads.delete(threadId);
@@ -735,6 +777,16 @@ export class CodexService extends EventEmitter {
     if (message.method === "thread/status/changed" && threadId && params.status && typeof params.status === "object") {
       const thread = this.threads.get(threadId);
       if (thread) thread.status = params.status as CodexThread["status"];
+    }
+    if (message.method === "thread/deleted" && threadId) {
+      // thread/delete 会连带删除派生子线程并逐条通知这里
+      const removed = this.threads.get(threadId);
+      this.forgetThread(threadId, removed?.path);
+      if (removed) {
+        this.db.deleteThreadState(threadId);
+        this.broadcast("threads.changed", { threads: this.sortedThreads() });
+        this.broadcast("unread.changed", { unreadThreadIds: this.db.unreadThreadIds() });
+      }
     }
     if (message.method === "turn/completed" && threadId) {
       const thread = this.threads.get(threadId);

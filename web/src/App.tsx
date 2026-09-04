@@ -28,7 +28,7 @@ import webPackage from "../package.json";
 import { ApiClient } from "./api";
 import { EmptyConversation, IconButton, LoadingScreen, SidebarHeading, ThreadRow } from "./components";
 import { ApprovalBar, Conversation } from "./conversation";
-import { NewThreadDialog, WorkspaceDialog } from "./dialogs";
+import { ConfirmDeleteDialog, NewThreadDialog, WorkspaceDialog } from "./dialogs";
 import {
   cloneThread,
   errorMessage,
@@ -210,6 +210,8 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [approvalPanelOpen, setApprovalPanelOpen] = useState(false);
+  const [deleteCandidate, setDeleteCandidate] = useState<Thread | null>(null);
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
@@ -656,6 +658,33 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
     setDrawer("workspace");
   };
 
+  const confirmDeleteThread = async (thread: Thread) => {
+    setDeletingThreadId(thread.id);
+    try {
+      await api.deleteThread(thread.id);
+    } finally {
+      setDeletingThreadId(null);
+    }
+    // 成功后清理本地状态；列表移除由 WS threads.changed 广播兜底，这里先做即时反馈
+    threadCacheRef.current.delete(thread.id);
+    setSnapshot((current) => ({
+      ...current,
+      threads: current.threads.filter((entry) => entry.id !== thread.id),
+    }));
+    if (selectedRef.current === thread.id) {
+      detailRequestRef.current += 1;
+      abortRef.current?.abort();
+      autoHistoryRef.current = false;
+      setSelectedThreadId(null);
+      detailRef.current = null;
+      setDetail(null);
+      setHistoryCursor(null);
+      setHistoryLoading(false);
+      setDetailLoading(false);
+    }
+    setDeleteCandidate(null);
+  };
+
   const appendStartedTurn = (threadId: string, turn: Turn) => {
     const current = detailRef.current;
     if (!current || current.id !== threadId) return;
@@ -789,6 +818,8 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
                         selected={thread.id === selectedThreadId}
                         unread={snapshot.unreadThreadIds.includes(thread.id)}
                         onSelect={() => void selectThread(thread)}
+                        onDelete={(candidate) => setDeleteCandidate(candidate)}
+                        deleting={deletingThreadId === thread.id}
                       />
                     ))}
                     {!loading && threads.length === 0 && <div className="empty-sidebar">暂无会话</div>}
@@ -805,8 +836,8 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         </div>
       </aside>
 
-      {(drawer || newThreadOpen || workspaceDialogOpen || approvalPanelOpen) && (
-        <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); setWorkspaceDialogOpen(false); setApprovalPanelOpen(false); }} />
+      {(drawer || newThreadOpen || workspaceDialogOpen || approvalPanelOpen || deleteCandidate) && (
+        <button className="backdrop" aria-label="关闭" onClick={() => { setDrawer(null); setNewThreadOpen(false); setWorkspaceDialogOpen(false); setApprovalPanelOpen(false); setDeleteCandidate(null); }} />
       )}
 
       <section className="conversation-pane">
@@ -850,6 +881,14 @@ function Dashboard({ api, auth, onAuthChange }: { api: ApiClient; auth: AuthStat
         <WorkspaceDialog
           onClose={() => setWorkspaceDialogOpen(false)}
           onAdd={addWorkspace}
+        />
+      )}
+
+      {deleteCandidate && (
+        <ConfirmDeleteDialog
+          title={threadTitle(deleteCandidate)}
+          onClose={() => setDeleteCandidate(null)}
+          onConfirm={() => confirmDeleteThread(deleteCandidate)}
         />
       )}
 

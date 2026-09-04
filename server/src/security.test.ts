@@ -262,6 +262,69 @@ describe("thread history pagination", () => {
 });
 
 describe("new thread materialization", () => {
+  it("keeps the app-server alive after polling sees a new thread without a first turn", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-pending-thread-"));
+    tempDirs.push(directory);
+    const db = new AppDatabase(directory);
+    const config: AppConfig = {
+      port: 0,
+      host: "127.0.0.1",
+      nodeEnv: "test",
+      dataDir: directory,
+      codexBin: "codex",
+      codexHome: undefined,
+      workspaceRoots: [directory],
+      allowedOrigin: "http://codexui.test",
+      adminUser: "admin",
+      adminPasswordHash: "unused",
+      sessionSecret: "test-session-secret-with-enough-entropy",
+      sessionIdleMs: 4 * 60 * 60 * 1_000,
+      secureCookies: false,
+      trustProxy: false,
+      pollIntervalMs: 3_000,
+      appVersion: "test",
+    };
+    const service = new CodexService(config, db);
+    const internals = service as unknown as {
+      connected: boolean;
+      lastActivityAt: number;
+      pendingThreads: Map<string, CodexThread>;
+      refreshThreads: (stateDbOnly: boolean) => Promise<void>;
+      maybeRecycle: () => void;
+      rpc: {
+        request: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+        restart: (delayMs?: number) => Promise<void>;
+      };
+    };
+    const thread = {
+      id: "thread-pending",
+      status: { type: "notLoaded" },
+      archived: false,
+    } as CodexThread;
+    let restarted = false;
+    internals.rpc.request = async (method, params) => {
+      if (method === "thread/list") {
+        return { data: params?.archived ? [] : [thread], nextCursor: null };
+      }
+      throw new Error(`unexpected RPC: ${method}`);
+    };
+    internals.rpc.restart = async () => {
+      restarted = true;
+    };
+    internals.connected = true;
+    internals.lastActivityAt = Date.now() - 10_000;
+    internals.pendingThreads.set(thread.id, thread);
+
+    await internals.refreshThreads(true);
+
+    internals.maybeRecycle();
+
+    expect(internals.pendingThreads.has(thread.id)).toBe(true);
+    expect(restarted).toBe(false);
+    await service.stop();
+    db.close();
+  });
+
   it("rejects symlinked workspaces that resolve outside configured roots", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-root-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codexui-outside-"));

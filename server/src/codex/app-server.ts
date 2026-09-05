@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
-import type { AppConfig } from "./config.js";
-import type { JsonObject, RpcMessage } from "./types.js";
+import type { AppConfig } from "../config.js";
+import type { JsonObject, RpcMessage } from "../types.js";
 
 type PendingRequest = {
   resolve: (value: unknown) => void;

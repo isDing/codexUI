@@ -1,27 +1,7 @@
+import { deepClone, isRecord } from "../shared/lib";
 import type { Model, Preferences, Thread, ThreadItem, Turn } from "./types";
 
-export const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-/** structuredClone 兼容旧浏览器（iOS<15.4）的降级实现 */
-export const cloneThread = (thread: Thread): Thread => {
-  try {
-    return typeof structuredClone === "function" ? structuredClone(thread) : JSON.parse(JSON.stringify(thread)) as Thread;
-  } catch {
-    return thread;
-  }
-};
-
-export const stringify = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-};
-
-export const errorMessage = (value: unknown): string => (value instanceof Error ? value.message : "操作失败");
+export { deepClone as cloneThread };
 
 export const userMessageText = (item: ThreadItem): string => {
   if (item.type !== "userMessage" || !Array.isArray(item.content)) return "";
@@ -95,14 +75,6 @@ export const sourceLabel = (source: unknown): string => {
   return labels[raw] ?? raw;
 };
 
-export const relativeTime = (timestamp: number): string => {
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "刚刚";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
-  return `${Math.floor(seconds / 86400)} 天`;
-};
-
 export const effortLabel = (value: string): string =>
   ({ none: "无", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大", ultra: "极高" })[value] ?? value;
 
@@ -113,7 +85,7 @@ export const toolName = (item: ThreadItem): string =>
   String(item.tool ?? (item.type === "webSearch" ? "网页搜索" : "工具调用"));
 
 export const changePath = (change: unknown): string => {
-  if (!isRecord(change)) return stringify(change);
+  if (!isRecord(change)) return String(change);
   return String(change.path ?? change.filePath ?? Object.keys(change)[0] ?? "文件");
 };
 

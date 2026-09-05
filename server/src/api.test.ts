@@ -8,7 +8,7 @@ import { createApp } from "./api.js";
 import type { AppConfig } from "./config.js";
 import { AppDatabase } from "./database.js";
 import { hashPassword } from "./security.js";
-import type { CodexService } from "./codex-service.js";
+import type { CodexService } from "./codex/service.js";
 
 class FakeService extends EventEmitter {
   async snapshot() {
@@ -30,6 +30,8 @@ describe("authentication API", () => {
       dataDir,
       codexBin: "codex",
       codexHome: undefined,
+      opencodeEnabled: false,
+      opencodeBin: "opencode",
       workspaceRoots: [dataDir],
       allowedOrigin: "http://codexui.test",
       adminUser: "admin",
@@ -50,7 +52,7 @@ describe("authentication API", () => {
   });
 
   it("requires valid credentials and a CSRF token for writes", async () => {
-    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    const app = createApp(config, db, { codex: new FakeService() as unknown as CodexService, opencode: null });
     await request(app)
       .post("/api/auth/login")
       .set("origin", config.allowedOrigin)
@@ -72,11 +74,11 @@ describe("authentication API", () => {
       .set("x-csrf-token", login.body.csrfToken)
       .expect(200);
     expect(activity.headers["set-cookie"]?.[0]).toContain("Max-Age=14400");
-    await agent.get("/api/bootstrap").expect(200);
+    await agent.get("/api/codex/bootstrap").expect(200);
   });
 
   it("rejects an unsafe request from another origin", async () => {
-    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    const app = createApp(config, db, { codex: new FakeService() as unknown as CodexService, opencode: null });
     await request(app)
       .post("/api/auth/login")
       .set("origin", "https://attacker.example")
@@ -85,7 +87,7 @@ describe("authentication API", () => {
   });
 
   it("returns a client error for malformed JSON instead of leaking parser details", async () => {
-    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    const app = createApp(config, db, { codex: new FakeService() as unknown as CodexService, opencode: null });
     await request(app)
       .post("/api/auth/login")
       .set("origin", config.allowedOrigin)
@@ -96,7 +98,7 @@ describe("authentication API", () => {
   });
 
   it("rejects oversized request bodies with 413", async () => {
-    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    const app = createApp(config, db, { codex: new FakeService() as unknown as CodexService, opencode: null });
     await request(app)
       .post("/api/auth/login")
       .set("origin", config.allowedOrigin)
@@ -108,7 +110,7 @@ describe("authentication API", () => {
 
   it("does not let a client bypass login throttling with a forged proxy chain", async () => {
     config.trustProxy = true;
-    const app = createApp(config, db, new FakeService() as unknown as CodexService);
+    const app = createApp(config, db, { codex: new FakeService() as unknown as CodexService, opencode: null });
     for (let index = 0; index < 8; index += 1) {
       await request(app)
         .post("/api/auth/login")

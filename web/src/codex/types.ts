@@ -1,3 +1,5 @@
+import type { PendingRequest, Workspace } from "../shared/types";
+
 export type ThreadStatus = { type: "notLoaded" | "idle" | "systemError" | "active" };
 
 export type ThreadItem = Record<string, unknown> & { type: string; id?: string };
@@ -29,14 +31,6 @@ export type Thread = {
   turns: Turn[];
 };
 
-export type Workspace = {
-  path: string;
-  name: string;
-  threadCount: number;
-  activeCount: number;
-  latestAt: number;
-};
-
 export type Model = {
   id: string;
   model: string;
@@ -54,14 +48,6 @@ export type HistoryPage = {
   nextCursor: string | null;
 };
 
-export type PendingRequest = {
-  key: string;
-  requestId: string | number;
-  method: string;
-  params: Record<string, unknown>;
-  createdAt: number;
-};
-
 export type Snapshot = {
   connected: boolean;
   threads: Thread[];
@@ -69,11 +55,4 @@ export type Snapshot = {
   models: Model[];
   unreadThreadIds: string[];
   pendingRequests: PendingRequest[];
-};
-
-export type AuthState = {
-  authenticated: boolean;
-  username?: string;
-  csrfToken?: string;
-  expiresAt?: number;
 };

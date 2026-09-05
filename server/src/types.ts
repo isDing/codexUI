@@ -64,6 +64,12 @@ export type ThreadPreferences = {
   fullAccess: boolean;
 };
 
+export type OcState = {
+  model: string | null;
+  agent: string | null;
+  fullAccess: boolean;
+};
+
 export type Workspace = {
   path: string;
   name: string;

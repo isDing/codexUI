@@ -2,10 +2,13 @@
 
 Codex UI is a self-hosted web client for the Codex App Server installed on this machine. It groups all persisted Codex threads by working directory, renders full thread history, streams active turns, and can continue an existing thread with per-thread model, reasoning-effort, and permission settings.
 
+It can additionally control [opencode](https://opencode.ai) through its `opencode serve` HTTP/SSE server. The two consoles are isolated modules (`server/src/codex`, `server/src/opencode`, `web/src/codex`, `web/src/opencode`) sharing login, database, and one WebSocket channel; a top-bar switch toggles between them.
+
 ## Runtime layout
 
 - Web/API: Node.js + Express + React, exposed by Docker on `127.0.0.1:3090`.
 - Codex: one `codex app-server` child process using `CODEX_HOME`.
+- opencode (optional): one `opencode serve` child process on a random localhost port protected by a generated Basic Auth password; enabled with `OPENCODE_ENABLED=true`.
 - State: a Docker volume containing login sessions, thread preferences, and unread completion notices.
 - Public ingress: a host Nginx instance (see `deploy/nginx-*.conf` for example configs).
 
@@ -34,6 +37,8 @@ CODE_DIR=/home/your-user/code       # workspace root 1
 SERVER_DIR=/home/your-user/server   # workspace root 2
 ALLOWED_ORIGIN=https://your-domain.example
 ```
+
+To enable the opencode console, set `OPENCODE_ENABLED=true` (the `opencode` binary must be on `PATH`; the Compose image installs it from `OPENCODE_VERSION`). opencode keeps its provider credentials under `~/.local/share/opencode` and config under `~/.config/opencode`; the Compose file mounts both from `HOME_DIR`.
 
 ## Run
 

@@ -70,6 +70,8 @@ export const loadConfig = () => {
     dataDir: path.resolve(process.env.DATA_DIR ?? "./data"),
     codexBin: process.env.CODEX_BIN ?? "codex",
     codexHome: process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : undefined,
+    opencodeEnabled: process.env.OPENCODE_ENABLED === "true",
+    opencodeBin: process.env.OPENCODE_BIN ?? "opencode",
     workspaceRoots,
     allowedOrigin: validateOrigin(process.env.ALLOWED_ORIGIN ?? "http://localhost:5173"),
     adminUser: required("ADMIN_USER", "admin").trim(),

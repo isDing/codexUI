@@ -9,7 +9,7 @@ import {
   preferencesByTurnFromPersistedLines,
   preferencesFromPersistedSettings,
   preferencesFromRuntimeSettings,
-} from "./codex-service.js";
+} from "./codex/service.js";
 import type { AppConfig } from "./config.js";
 import type { CodexThread, CodexTurn } from "./types.js";
 import { hashPassword, verifyPassword } from "./security.js";
@@ -173,6 +173,8 @@ describe("thread history pagination", () => {
       dataDir: directory,
       codexBin: "codex",
       codexHome: undefined,
+      opencodeEnabled: false,
+      opencodeBin: "opencode",
       workspaceRoots: [directory],
       allowedOrigin: "http://codexui.test",
       adminUser: "admin",
@@ -273,6 +275,8 @@ describe("new thread materialization", () => {
       dataDir: directory,
       codexBin: "codex",
       codexHome: undefined,
+      opencodeEnabled: false,
+      opencodeBin: "opencode",
       workspaceRoots: [directory],
       allowedOrigin: "http://codexui.test",
       adminUser: "admin",
@@ -339,6 +343,8 @@ describe("new thread materialization", () => {
       dataDir: root,
       codexBin: "codex",
       codexHome: undefined,
+      opencodeEnabled: false,
+      opencodeBin: "opencode",
       workspaceRoots: [root],
       allowedOrigin: "http://codexui.test",
       adminUser: "admin",
@@ -368,6 +374,8 @@ describe("new thread materialization", () => {
       dataDir: directory,
       codexBin: "codex",
       codexHome: undefined,
+      opencodeEnabled: false,
+      opencodeBin: "opencode",
       workspaceRoots: [directory],
       allowedOrigin: "http://codexui.test",
       adminUser: "admin",

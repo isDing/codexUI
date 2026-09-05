@@ -4,6 +4,7 @@ services:
       context: .
       args:
         CODEX_VERSION: "0.150.1"
+        OPENCODE_VERSION: "1.18.29"
     image: codexui:latest
     container_name: codexui
     init: true
@@ -22,11 +23,18 @@ services:
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-http://localhost:5173}
       SECURE_COOKIES: ${SECURE_COOKIES:-"true"}
       TRUST_PROXY: ${TRUST_PROXY:-"false"}
+      OPENCODE_ENABLED: ${OPENCODE_ENABLED:-"false"}
+      XDG_STATE_HOME: ${HOME_DIR:-/home/user}/.local/state
+      XDG_CACHE_HOME: ${HOME_DIR:-/home/user}/.cache
     ports:
       - "127.0.0.1:${PORT_MAP:-3090}:3000"
     volumes:
       - codexui-data:/app/data
       - ${HOME_DIR:-/home/user}/.codex:${HOME_DIR:-/home/user}/.codex
+      - ${HOME_DIR:-/home/user}/.local/share/opencode:${HOME_DIR:-/home/user}/.local/share/opencode
+      - ${HOME_DIR:-/home/user}/.local/state/opencode:${HOME_DIR:-/home/user}/.local/state/opencode
+      - ${HOME_DIR:-/home/user}/.config/opencode:${HOME_DIR:-/home/user}/.config/opencode
+      - ${HOME_DIR:-/home/user}/.cache/opencode:${HOME_DIR:-/home/user}/.cache/opencode
       - ${CODE_DIR:-/home/user/code}:${CODE_DIR:-/home/user/code}
       - ${SERVER_DIR:-/home/user/server}:${SERVER_DIR:-/home/user/server}
     tmpfs:

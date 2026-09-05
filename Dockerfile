@@ -13,9 +13,10 @@ RUN npm run build
 FROM node:24-bookworm-slim AS runtime
 
 ARG CODEX_VERSION=0.150.1
+ARG OPENCODE_VERSION=1.18.29
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl git openssh-client ripgrep \
-  && npm install --global "@openai/codex@${CODEX_VERSION}" \
+  && npm install --global "@openai/codex@${CODEX_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
@@ -32,6 +33,7 @@ COPY --from=build /app/server/dist ./server/dist
 COPY --from=build /app/web/dist ./web/dist
 
 RUN mkdir -p /app/data /home/user/.codex /home/user/code /home/user/server \
+  && mkdir -p /home/user/.local/share/opencode /home/user/.local/state/opencode /home/user/.config/opencode /home/user/.cache/opencode \
   && chown -R 1000:1000 /app /home/user
 
 ENV NODE_ENV=production \

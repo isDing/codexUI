@@ -121,7 +121,7 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   expect(overflow).toBeLessThanOrEqual(0);
 
   // 模拟发送：拦截 turn 创建请求，验证用户消息回显与最终回答渲染顺序
-  await page.route("**/api/threads/*/turns", async (route) => {
+  await page.route("**/api/codex/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -155,7 +155,7 @@ test("desktop login, thread navigation, and history rendering", async ({ page })
   await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 模拟最终回答" })).toBeVisible();
   const messageOrder = await page.locator(".turn-block").last().locator(".message").evaluateAll((messages) => messages.map((message) => message.textContent ?? ""));
   expect(messageOrder.findIndex((message) => message.includes(requestEcho))).toBeLessThan(messageOrder.findIndex((message) => message.includes("E2E 模拟最终回答")));
-  await page.unroute("**/api/threads/*/turns");
+  await page.unroute("**/api/codex/threads/*/turns");
 });
 
 test("switching between threads stays instant and never wedges on the loading screen", async ({ page }) => {
@@ -195,7 +195,7 @@ test("a running request can be cancelled and the composer re-enables", async ({ 
   await openFirstIdleThread(page);
   await expect(page.locator(CONTENT).first()).toBeVisible();
 
-  await page.route("**/api/threads/*/turns", async (route) => {
+  await page.route("**/api/codex/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -212,7 +212,7 @@ test("a running request can be cancelled and the composer re-enables", async ({ 
       }),
     });
   });
-  await page.route("**/api/threads/*/cancel", async (route) => {
+  await page.route("**/api/codex/threads/*/cancel", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
 
@@ -233,8 +233,8 @@ test("a running request can be cancelled and the composer re-enables", async ({ 
   await expect(composerArea).toBeEnabled();
   await expect(page.getByTitle("发送")).toBeVisible();
   await expect(page.locator(".interrupted-note").first()).toBeVisible();
-  await page.unroute("**/api/threads/*/turns");
-  await page.unroute("**/api/threads/*/cancel");
+  await page.unroute("**/api/codex/threads/*/turns");
+  await page.unroute("**/api/codex/threads/*/cancel");
 });
 
 test("slash commands: menu, execute, argument backfill, and // escape", async ({ page }) => {
@@ -245,11 +245,11 @@ test("slash commands: menu, execute, argument backfill, and // escape", async ({
   await expect(page.locator(CONTENT).first()).toBeVisible();
 
   let lastCommand: { command?: string; args?: string } = {};
-  await page.route("**/api/threads/*/command", async (route) => {
+  await page.route("**/api/codex/threads/*/command", async (route) => {
     lastCommand = (route.request().postDataJSON() ?? {}) as { command?: string; args?: string };
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
-  await page.route("**/api/threads/*/turns", async (route) => {
+  await page.route("**/api/codex/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -302,8 +302,8 @@ test("slash commands: menu, execute, argument backfill, and // escape", async ({
   await page.keyboard.press("Enter");
   await expect(page.locator(".user-message .message-body").filter({ hasText: "/archive" })).toBeVisible();
 
-  await page.unroute("**/api/threads/*/command");
-  await page.unroute("**/api/threads/*/turns");
+  await page.unroute("**/api/codex/threads/*/command");
+  await page.unroute("**/api/codex/threads/*/turns");
 });
 
 test("editing the last request re-executes and clears the old response", async ({ page }) => {
@@ -320,7 +320,7 @@ test("editing the last request re-executes and clears the old response", async (
   test.skip(!originalText, "原需求内容为空");
 
   let retryBody: { text?: string } = {};
-  await page.route("**/api/threads/*/retry", async (route) => {
+  await page.route("**/api/codex/threads/*/retry", async (route) => {
     retryBody = (route.request().postDataJSON() ?? {}) as { text?: string };
     await route.fulfill({
       status: 202,
@@ -355,7 +355,7 @@ test("editing the last request re-executes and clears the old response", async (
   // 原需求与旧回复已随回滚清除（最后一条轮次块内不再出现）
   await expect(lastTurnAfter.locator(".user-message .message-body").filter({ hasText: originalText })).toHaveCount(0);
   await expect(page.locator(".edit-mode-bar")).toHaveCount(0);
-  await page.unroute("**/api/threads/*/retry");
+  await page.unroute("**/api/codex/threads/*/retry");
 });
 
 test("live turn view: no reasoning, collapsed merged commands, open commentary", async ({ page }) => {
@@ -366,7 +366,7 @@ test("live turn view: no reasoning, collapsed merged commands, open commentary",
   await expect(page.locator(CONTENT).first()).toBeVisible();
 
   // 模拟一个进行中的轮次：思考过程 + 过程消息 + 3 条相邻命令 + 文件修改 + 最终回答
-  await page.route("**/api/threads/*/turns", async (route) => {
+  await page.route("**/api/codex/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -411,7 +411,7 @@ test("live turn view: no reasoning, collapsed merged commands, open commentary",
   await expect(lastTurn.locator("details.commentary-message")).toHaveAttribute("open", "");
   // 最终回答与用户消息可见
   await expect(lastTurn.locator(".agent-message .message-body").filter({ hasText: "E2E 实时视图最终回答" })).toBeVisible();
-  await page.unroute("**/api/threads/*/turns");
+  await page.unroute("**/api/codex/threads/*/turns");
 });
 
 test("conversation view stays position-stable while older history loads", async ({ page }) => {
@@ -444,7 +444,7 @@ test("refresh while WebSocket is still connecting never crashes", async ({ page 
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
   const { threadId } = await page.evaluate(async () => {
-    const res = await fetch("/api/bootstrap");
+    const res = await fetch("/api/codex/bootstrap");
     const data = await res.json();
     return { threadId: data.threads[0]?.id ?? "" };
   });
@@ -479,7 +479,7 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   await page.screenshot({ path: "test-results/conversation-mobile.png", fullPage: true });
 
   // 移动端：回车只换行不发送，发送按钮负责发送
-  await page.route("**/api/threads/*/turns", async (route) => {
+  await page.route("**/api/codex/threads/*/turns", async (route) => {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
@@ -505,7 +505,7 @@ test("mobile drawers and conversation remain usable", async ({ page }) => {  awa
   await page.getByTitle("发送").click();
   await expect(page.locator(".user-message .message-body").filter({ hasText: mobileEcho })).toBeVisible();
   await expect(page.locator(".agent-message .message-body").filter({ hasText: "E2E 移动端模拟回答" })).toBeVisible();
-  await page.unroute("**/api/threads/*/turns");
+  await page.unroute("**/api/codex/threads/*/turns");
 
   const dimensions = await page.evaluate(() => ({
     viewport: document.documentElement.clientWidth,

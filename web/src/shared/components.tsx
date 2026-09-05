@@ -1,7 +1,5 @@
 import { Archive, Code2, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { relativeTime, sourceLabel, threadTitle } from "./lib";
-import type { Thread } from "./types";
 
 export function LoadingScreen() {
   return (
@@ -43,36 +41,40 @@ export function SidebarHeading({ icon, title, onClose, collapsed = false, onTogg
   );
 }
 
-export function ThreadRow({ thread, selected, unread, onSelect, onDelete, deleting = false }: {
-  thread: Thread;
+export function ThreadRow({ title, meta, time, active = false, archived = false, unread = false, selected, onSelect, onDelete, deleting = false }: {
+  title: string;
+  meta: string;
+  time: string;
+  active?: boolean;
+  archived?: boolean;
+  unread?: boolean;
   selected: boolean;
-  unread: boolean;
   onSelect: () => void;
-  onDelete: (thread: Thread) => void;
+  onDelete: () => void;
   deleting?: boolean;
 }) {
   return (
     <div className={`thread-row ${selected ? "selected" : ""} ${unread ? "unread" : ""}`}>
       <button className="thread-row-main" onClick={onSelect} aria-pressed={selected}>
         <span className="thread-title-line">
-          <strong>{threadTitle(thread)}</strong>
-          {thread.status.type === "active" && <LoaderCircle className="spin active-icon" size={15} />}
-          {thread.archived && <Archive size={14} />}
+          <strong>{title}</strong>
+          {active && <LoaderCircle className="spin active-icon" size={15} />}
+          {archived && <Archive size={14} />}
           {unread && <span className="unread-dot" title="任务已完成" />}
         </span>
         <span className="thread-meta">
-          <span>{sourceLabel(thread.source)}</span>
-          <time>{relativeTime((thread.recencyAt ?? thread.updatedAt) * 1000)}</time>
+          <span>{meta}</span>
+          <time>{time}</time>
         </span>
       </button>
       <button
         className="thread-row-delete"
         title="删除会话"
-        aria-label={`删除会话 ${threadTitle(thread)}`}
+        aria-label={`删除会话 ${title}`}
         disabled={deleting}
         onClick={(event) => {
           event.stopPropagation();
-          onDelete(thread);
+          onDelete();
         }}
       >
         {deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}

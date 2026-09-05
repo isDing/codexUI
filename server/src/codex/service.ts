@@ -3,9 +3,9 @@ import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import type { AppConfig } from "./config.js";
-import { CodexAppServer } from "./codex-app-server.js";
-import type { AppDatabase } from "./database.js";
+import type { AppConfig } from "../config.js";
+import { CodexAppServer } from "./app-server.js";
+import type { AppDatabase } from "../database.js";
 import type {
   ApprovalRequest,
   CodexModel,
@@ -14,7 +14,7 @@ import type {
   RpcMessage,
   ThreadPreferences,
   Workspace,
-} from "./types.js";
+} from "../types.js";
 
 const SOURCE_KINDS = [
   "cli",

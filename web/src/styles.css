@@ -152,6 +152,50 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
   background: var(--panel);
 }
 .app-shell.sidebar-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
+[data-ui="opencode"] {
+  --ink: #1f2430;
+  --muted: #66707f;
+  --faint: #94a0ad;
+  --line: #dde2ea;
+  --line-strong: #ccd3dd;
+  --panel: #ffffff;
+  --panel-soft: #f6f8fc;
+  --sidebar: #edf0f7;
+  --dark: #171d2b;
+  --green: #3d5afe;
+  --green-soft: #e8ecff;
+  --cyan: #2f55d4;
+  --shadow: 0 12px 30px rgba(23, 29, 43, 0.14);
+}
+[data-ui="opencode"] button:focus-visible,
+[data-ui="opencode"] input:focus-visible,
+[data-ui="opencode"] textarea:focus-visible,
+[data-ui="opencode"] select:focus-visible,
+[data-ui="opencode"] summary:focus-visible { outline-color: #4c6fff; }
+[data-ui="opencode"] .topbar { background: #2b3a8f; border-bottom-color: #233178; }
+[data-ui="opencode"] .topbar .brand-mark { background: #1e2a6b; }
+[data-ui="opencode"] .topbar .icon-button:hover { background: #37479f; border-color: #46559f; }
+[data-ui="opencode"] .topbar .connection-pill { border-color: #46559f; color: #d6dcf5; }
+[data-ui="opencode"] .topbar .app-version { color: #aab6e8; }
+[data-ui="opencode"] .active-pip { background: #4c6fff; }
+[data-ui="opencode"] .new-thread-button { color: #eef1f8; background: #1e2637; border-color: #1e2637; }
+[data-ui="opencode"] .new-thread-button:hover:not(:disabled) { background: #2b3650; }
+[data-ui="opencode"] .sidebar-toggle:hover { background: #e3e8f2; }
+[data-ui="opencode"] .icon-button:hover { background: #e3e8f2; }
+[data-ui="opencode"] .search-box:focus-within { border-color: #8ea3d6; }
+[data-ui="opencode"] .conversation-state-icon { color: #3a4560; }
+[data-ui="opencode"] .edit-message-button:hover { color: #3d5afe; border-color: #c3cdf0; }
+[data-ui="opencode"] .markdown-body a { color: #3d5afe; }
+[data-ui="opencode"] .markdown-body pre { color: #e3e8f4; background: #1c2333; }
+[data-ui="opencode"] .command-item > code { color: #e3e8f4; background: #1c2333; }
+[data-ui="opencode"] .user-message .message-body { color: #f6f8fc; background: #232c40; border-color: #232c40; }
+[data-ui="opencode"] .composer:focus-within { border-color: #6f86c9; box-shadow: 0 0 0 3px rgba(61, 90, 254, 0.1); }
+[data-ui="opencode"] .slash-name { color: #3d5afe; }
+[data-ui="opencode"] .backend-switch { background: #e7ebf4; }
+[data-ui="opencode"] .thread-row.selected { border-color: #c3ccdb; }
+[data-ui="opencode"] .composer-toolbar .model-select,
+[data-ui="opencode"] .access-toggle,
+[data-ui="opencode"] .approval-other-list li { background: #fafbfe; }
 .topbar {
   z-index: 30;
   grid-column: 1 / -1;
@@ -460,3 +504,14 @@ button:disabled { cursor: not-allowed; opacity: 0.52; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+.backend-switch { display: inline-flex; margin-left: 10px; padding: 2px; background: #eef2ef; border: 1px solid var(--line); border-radius: 6px; }
+.backend-switch button { height: 24px; padding: 0 10px; color: var(--muted); background: transparent; border: 0; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer; }
+.backend-switch button.active { color: var(--ink); background: #fff; box-shadow: 0 1px 2px rgba(20, 25, 22, 0.08); }
+.composer-toolbar { display: flex; align-items: center; gap: 8px; width: min(100%, 900px); margin: 0 auto 6px; }
+.composer-toolbar .model-select { max-width: 320px; height: 28px; padding: 0 8px; color: var(--ink); background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 5px; font-size: 11.5px; }
+.access-toggle { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px; color: var(--muted); background: #fbfcfb; border: 1px solid var(--line-strong); border-radius: 5px; font-size: 11.5px; cursor: pointer; }
+.access-toggle.on { color: #9a6a1f; background: var(--amber-soft); border-color: #edd1a0; }
+.approval-other-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.approval-other-list li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; background: #fbfcfb; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.approval-other-list li span { color: var(--muted); overflow-wrap: anywhere; text-align: right; }

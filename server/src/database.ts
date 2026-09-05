@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { SessionInfo, ThreadPreferences } from "./types.js";
+import type { OcState, SessionInfo, ThreadPreferences } from "./types.js";
 
 type SessionRow = {
   token_hash: string;
@@ -40,6 +40,18 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS workspace_paths (
         path TEXT PRIMARY KEY,
         created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS oc_thread_state (
+        thread_id TEXT PRIMARY KEY,
+        model TEXT,
+        agent TEXT,
+        full_access INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS oc_thread_notices (
+        thread_id TEXT PRIMARY KEY,
+        unread INTEGER NOT NULL DEFAULT 0,
+        completed_at INTEGER NOT NULL DEFAULT 0
       );
     `);
   }
@@ -135,6 +147,57 @@ export class AppDatabase {
 
   unreadThreadIds(): string[] {
     const rows = this.db.prepare("SELECT thread_id FROM thread_notices WHERE unread = 1").all() as Array<{
+      thread_id: string;
+    }>;
+    return rows.map((row) => row.thread_id);
+  }
+
+  getOcState(threadId: string): OcState {
+    const row = this.db
+      .prepare("SELECT model, agent, full_access FROM oc_thread_state WHERE thread_id = ?")
+      .get(threadId) as { model: string | null; agent: string | null; full_access: number } | undefined;
+    return row
+      ? { model: row.model, agent: row.agent, fullAccess: row.full_access === 1 }
+      : { model: null, agent: null, fullAccess: false };
+  }
+
+  setOcState(threadId: string, value: OcState, now = Date.now()): void {
+    this.db
+      .prepare(`
+        INSERT INTO oc_thread_state (thread_id, model, agent, full_access, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          model = excluded.model,
+          agent = excluded.agent,
+          full_access = excluded.full_access,
+          updated_at = excluded.updated_at
+      `)
+      .run(threadId, value.model, value.agent, value.fullAccess ? 1 : 0, now);
+  }
+
+  deleteOcThreadState(threadId: string): void {
+    this.db.prepare("DELETE FROM oc_thread_state WHERE thread_id = ?").run(threadId);
+    this.db.prepare("DELETE FROM oc_thread_notices WHERE thread_id = ?").run(threadId);
+  }
+
+  markOcUnread(threadId: string, completedAt = Date.now()): void {
+    this.db
+      .prepare(`
+        INSERT INTO oc_thread_notices (thread_id, unread, completed_at)
+        VALUES (?, 1, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET unread = 1, completed_at = excluded.completed_at
+      `)
+      .run(threadId, completedAt);
+  }
+
+  markOcRead(threadId: string): void {
+    this.db
+      .prepare("INSERT INTO oc_thread_notices (thread_id, unread, completed_at) VALUES (?, 0, 0) ON CONFLICT(thread_id) DO UPDATE SET unread = 0")
+      .run(threadId);
+  }
+
+  ocUnreadThreadIds(): string[] {
+    const rows = this.db.prepare("SELECT thread_id FROM oc_thread_notices WHERE unread = 1").all() as Array<{
       thread_id: string;
     }>;
     return rows.map((row) => row.thread_id);

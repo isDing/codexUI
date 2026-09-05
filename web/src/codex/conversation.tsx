@@ -22,23 +22,22 @@ import {
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ApiClient } from "./api";
+import type { CodexApiClient } from "./api";
+import { errorMessage, isRecord, stringify } from "../shared/lib";
 import {
   approvalTitle,
   changePath,
   effortLabel,
   ensureUserMessage,
-  errorMessage,
   isProcessItem,
-  isRecord,
   modelFor,
-  stringify,
   toolName,
   toolStatus,
   userMessageItem,
 } from "./lib";
 import { filterSlashCommands, matchSlashCommand, parseSlash, type SlashCommand } from "./slash";
-import type { Model, PendingRequest, Preferences, Thread, ThreadItem, Turn } from "./types";
+import type { PendingRequest } from "../shared/types";
+import type { Model, Preferences, Thread, ThreadItem, Turn } from "./types";
 
 export function Conversation({
   api,
@@ -59,7 +58,7 @@ export function Conversation({
   onError,
   onRequestsChange,
 }: {
-  api: ApiClient;
+  api: CodexApiClient;
   thread: Thread;
   listThread: Thread;
   models: Model[];
@@ -731,7 +730,7 @@ function ItemView({ item, alwaysOpen = false, editable = false, onEdit, mergedCo
 }
 
 export function ApprovalBar({ api, requests, onError, onRequestsChange }: {
-  api: ApiClient;
+  api: CodexApiClient;
   requests: PendingRequest[];
   onError: (value: string) => void;
   onRequestsChange: (value: PendingRequest[]) => void;

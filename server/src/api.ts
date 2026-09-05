@@ -21,50 +21,29 @@ import {
   sessionCookie,
 } from "./auth.js";
 import { verifyPassword } from "./security.js";
-import { CodexService } from "./codex-service.js";
+import type { RouteContext } from "./context.js";
+import { jsonError } from "./context.js";
+import type { CodexService } from "./codex/service.js";
+import { registerCodexRoutes } from "./codex/routes.js";
+import type { OpencodeService } from "./opencode/service.js";
+import { registerOpencodeRoutes } from "./opencode/routes.js";
+
+export type ServiceHub = {
+  codex: CodexService;
+  opencode: OpencodeService | null;
+};
 
 const loginSchema = z.object({ username: z.string().trim().min(1).max(120), password: z.string().min(1).max(1_000) });
-const threadSchema = z.object({
-  cwd: z.string().min(1).max(4_000),
-  model: z.string().nullable().optional(),
-  effort: z.string().nullable().optional(),
-  fullAccess: z.boolean().default(false),
-});
-const workspaceSchema = z.object({ path: z.string().trim().min(1).max(4_000) });
-const historyQuerySchema = z.object({ cursor: z.string().min(1).max(20_000) });
-const turnSchema = z.object({
-  text: z.string().trim().min(1).max(100_000),
-  model: z.string().nullable().optional(),
-  effort: z.string().nullable().optional(),
-  fullAccess: z.boolean().default(false),
-});const approvalSchema = z.object({
-  decision: z.enum(["accept", "decline"]).optional(),
-  answers: z.record(z.string(), z.unknown()).optional(),
-  content: z.record(z.string(), z.unknown()).optional(),
-  result: z.unknown().optional(),
-});
-
-const idParam = z.string().min(1).max(200);
-const cancelSchema = z.object({ turnId: z.string().min(1).max(200).optional() });
-const commandSchema = z.object({
-  command: z.enum(["rename", "archive", "unarchive", "compact", "goal", "steer"]),
-  args: z.string().trim().max(2_000).optional(),
-});
 const LOGIN_ATTEMPT_LIMIT = 8;
 const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60_000;
 const LOGIN_ATTEMPT_BUCKET_LIMIT = 4_096;
 const LOGIN_ATTEMPT_PRUNE_INTERVAL_MS = 60_000;
 
-const jsonError = (response: Response, status: number, error: unknown): void => {
-  const message = error instanceof Error ? error.message : "请求失败";
-  response.status(status).json({ error: message });
-};
-
 const touch = (request: Request, db: AppDatabase): void => {
   if (request.authTokenHash) db.touchSession(request.authTokenHash, Date.now());
 };
 
-export const createApp = (config: AppConfig, db: AppDatabase, service: CodexService): Express => {
+export const createApp = (config: AppConfig, db: AppDatabase, hub: ServiceHub): Express => {
   const app = express();
   // 生产拓扑固定为一层 Nginx；不能信任客户端提供的更早代理地址。
   if (config.trustProxy) app.set("trust proxy", 1);
@@ -196,188 +175,21 @@ export const createApp = (config: AppConfig, db: AppDatabase, service: CodexServ
     response.json({ authenticated: false });
   });
 
-  app.get("/api/bootstrap", auth, async (_request, response) => {
-    try {
-      response.json(await service.snapshot());
-    } catch (error) {
-      jsonError(response, 503, error);
-    }
+  app.get("/api/meta", auth, (_request, response) => {
+    response.json({ backends: hub.opencode ? ["codex", "opencode"] : ["codex"] });
   });
 
-  app.post("/api/workspaces", auth, requireCsrf, async (request: Request, response: Response) => {
-    const parsed = workspaceSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "工作区路径无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.status(201).json(await service.addWorkspace(parsed.data.path));
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.get("/api/threads/:threadId", auth, async (request, response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    if (!threadId.success) {
-      response.status(400).json({ error: "会话 ID 无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.json(await service.readThread(threadId.data));
-    } catch (error) {
-      jsonError(response, 404, error);
-    }
-  });
-
-  app.get("/api/threads/:threadId/history", auth, async (request, response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    const query = historyQuerySchema.safeParse(request.query);
-    if (!threadId.success || !query.success) {
-      response.status(400).json({ error: "历史记录游标无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.json(await service.readThreadHistory(threadId.data, query.data.cursor));
-    } catch (error) {
-      jsonError(response, 404, error);
-    }
-  });
-
-  app.post("/api/threads", auth, requireCsrf, async (request: Request, response: Response) => {
-    const parsed = threadSchema.safeParse(request.body);
-    if (!parsed.success) {
-      response.status(400).json({ error: "工作区或会话设置无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.status(201).json(await service.createThread(parsed.data));
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.post("/api/threads/:threadId/turns", auth, requireCsrf, async (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    const parsed = turnSchema.safeParse(request.body);
-    if (!threadId.success || !parsed.success) {
-      response.status(400).json({ error: "需求内容或会话设置无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.status(202).json(
-        await service.startTurn(threadId.data, {
-          ...parsed.data,
-          model: parsed.data.model ?? null,
-          effort: parsed.data.effort ?? null,
-        }),
-      );
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.post("/api/threads/:threadId/read", auth, requireCsrf, (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    if (!threadId.success) {
-      response.status(400).json({ error: "会话 ID 无效" });
-      return;
-    }
-    touch(request, db);
-    service.markRead(threadId.data);
-    response.json({ unreadThreadIds: db.unreadThreadIds() });
-  });
-
-  app.delete("/api/threads/:threadId", auth, requireCsrf, async (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    if (!threadId.success) {
-      response.status(400).json({ error: "会话 ID 无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      await service.deleteThread(threadId.data);
-      response.json({ ok: true });
-    } catch (error) {
-      jsonError(response, 404, error);
-    }
-  });
-
-  app.post("/api/threads/:threadId/retry", auth, requireCsrf, async (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    const parsed = turnSchema.safeParse(request.body);
-    if (!threadId.success || !parsed.success) {
-      response.status(400).json({ error: "需求内容或会话设置无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.status(202).json(
-        await service.retryTurn(threadId.data, {
-          ...parsed.data,
-          model: parsed.data.model ?? null,
-          effort: parsed.data.effort ?? null,
-        }),
-      );
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.post("/api/threads/:threadId/cancel", auth, requireCsrf, async (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    const body = cancelSchema.safeParse(request.body ?? {});
-    if (!threadId.success || !body.success) {
-      response.status(400).json({ error: "请求参数无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      await service.cancelTurn(threadId.data, body.data.turnId);
-      response.json({ ok: true });
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.post("/api/threads/:threadId/command", auth, requireCsrf, async (request: Request, response: Response) => {
-    const threadId = idParam.safeParse(request.params.threadId);
-    const body = commandSchema.safeParse(request.body ?? {});
-    if (!threadId.success || !body.success) {
-      response.status(400).json({ error: "命令参数无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      response.json(await service.runCommand(threadId.data, body.data.command, body.data.args));
-    } catch (error) {
-      jsonError(response, 400, error);
-    }
-  });
-
-  app.post("/api/requests/:key/respond", auth, requireCsrf, (request: Request, response: Response) => {
-    const key = idParam.safeParse(request.params.key);
-    const body = approvalSchema.safeParse(request.body);
-    if (!key.success || !body.success) {
-      response.status(400).json({ error: "响应格式无效" });
-      return;
-    }
-    try {
-      touch(request, db);
-      service.respondToRequest(key.data, body.data);
-      response.json({ pendingRequests: service.publicApprovals() });
-    } catch (error) {
-      jsonError(response, 404, error);
-    }
-  });
+  const ctx: RouteContext = { config, db, auth, touch: (request) => touch(request, db) };
+  registerCodexRoutes(app, ctx, hub.codex);
+  if (hub.opencode) registerOpencodeRoutes(app, ctx, hub.opencode);
 
   app.get("/api/health", (_request, response) =>
-    response.json({ ok: true, service: "codex-ui", codexConnected: service.codexConnected }),
+    response.json({
+      ok: true,
+      service: "codex-ui",
+      codexConnected: hub.codex.codexConnected,
+      opencodeConnected: hub.opencode?.ocConnected ?? null,
+    }),
   );
 
   // 未匹配的 API 路由返回 JSON 404，避免落到 SPA 兜底返回 HTML
@@ -424,7 +236,7 @@ const isJsonSyntaxError = (error: unknown): boolean =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, service: CodexService) => {
+export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, hub: ServiceHub) => {
   const clients = new Map<WebSocket, { clientId: string; tokenHash: string; lastTouchAt: number }>();
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
@@ -444,7 +256,8 @@ export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, servi
   const broadcast = (message: unknown): void => {
     for (const socket of clients.keys()) send(socket, message);
   };
-  service.on("event", (event: unknown) => broadcast(event));
+  hub.codex.on("event", (event: unknown) => broadcast({ backend: "codex", ...(event as object) }));
+  hub.opencode?.on("event", (event: unknown) => broadcast({ backend: "opencode", ...(event as object) }));
 
   wss.on("connection", (socket: WebSocket, request: IncomingMessage) => {
     const resolved = resolveSession(request.headers.cookie, db, config);
@@ -455,15 +268,29 @@ export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, servi
     const clientId = crypto.randomUUID();
     const client = { clientId, tokenHash: resolved.tokenHash, lastTouchAt: Date.now() };
     clients.set(socket, client);
-    void service.snapshot()
-      .then((snapshot) => send(socket, { type: "snapshot", payload: snapshot }))
-      .catch(() => send(socket, { type: "error", payload: { message: "无法加载初始状态" } }));
-    send(socket, { type: "connection", payload: { connected: true, message: "实时连接已建立" } });
+    void hub.codex
+      .snapshot()
+      .then((snapshot) => send(socket, { backend: "codex", type: "snapshot", payload: snapshot }))
+      .catch(() => send(socket, { backend: "codex", type: "error", payload: { message: "无法加载初始状态" } }));
+    if (hub.opencode) {
+      void hub.opencode
+        .snapshot()
+        .then((snapshot) => send(socket, { backend: "opencode", type: "snapshot", payload: snapshot }))
+        .catch(() => send(socket, { backend: "opencode", type: "error", payload: { message: "无法加载初始状态" } }));
+    }
+    send(socket, { backend: "shared", type: "connection", payload: { connected: true, message: "实时连接已建立" } });
 
     socket.on("message", (raw: Buffer) => {
       try {
-        const message = JSON.parse(raw.toString()) as { type?: string; threadId?: string | null };
-        if (message.type === "viewing") service.setViewer(clientId, message.threadId ?? null);
+        const message = JSON.parse(raw.toString()) as {
+          type?: string;
+          backend?: string;
+          threadId?: string | null;
+        };
+        if (message.type === "viewing") {
+          const target = message.backend === "opencode" ? hub.opencode : hub.codex;
+          target?.setViewer(clientId, message.threadId ?? null);
+        }
         if (message.type === "ping") send(socket, { type: "pong", at: Date.now() });
       } catch {
         send(socket, { type: "error", payload: { message: "无法解析实时消息" } });
@@ -471,7 +298,8 @@ export const createWebSocketHandler = (config: AppConfig, db: AppDatabase, servi
     });
     socket.on("close", () => {
       clients.delete(socket);
-      service.removeViewer(clientId);
+      hub.codex.removeViewer(clientId);
+      hub.opencode?.removeViewer(clientId);
     });
   });
 

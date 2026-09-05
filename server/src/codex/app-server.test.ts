@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CodexAppServer } from "./codex-app-server.js";
-import type { AppConfig } from "./config.js";
+import { CodexAppServer } from "./app-server.js";
+import type { AppConfig } from "../config.js";
 
 const createFakeCodex = (directory: string): string => {
   const scriptPath = path.join(directory, "fake-codex.mjs");
@@ -31,6 +31,8 @@ const testConfig = (directory: string, codexBin: string): AppConfig => ({
   dataDir: directory,
   codexBin,
   codexHome: undefined,
+  opencodeEnabled: false,
+  opencodeBin: "opencode",
   workspaceRoots: [directory],
   allowedOrigin: "http://codexui.test",
   adminUser: "admin",
